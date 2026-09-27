@@ -1,0 +1,23 @@
+# Blender binaries -- the scene is fully regenerable from blender/scripts/scene_tumor.py,
+# so a .blend in git is redundant weight and its merges are not resolvable by hand.
+*.blend
+*.blend1
+*.blend2
+
+# Render output. Regenerate rather than version.
+blender/renders/*
+!blender/renders/.gitkeep
+
+# Imported models and textures can be large. Promote individual files with
+# `git add -f` if one genuinely needs tracking.
+blender/assets/*
+!blender/assets/.gitkeep
+
+# Blender scratch
+*.blend.lock
+__pycache__/
+*.pyc
+
+# OS noise
+.DS_Store
+Thumbs.db
