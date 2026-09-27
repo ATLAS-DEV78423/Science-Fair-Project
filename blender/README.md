@@ -41,21 +41,45 @@ Scaffold plus the first asset.
 **Built and verified:** 11 collections, 5 controllers, 4 cameras, 3 lights, world
 ambient, render settings.
 
-**Assets:** `asset_healthy_cell.py` is implemented and validated. The other
-five `asset_*.py` and all six `animation_*.py` remain **API contracts only** —
-their entry points raise `NotImplementedError` with a note on what belongs
-there. That is intentional: the signatures are fixed now so nothing drifts, but
-no speculative geometry has been written.
+**Assets:** `asset_healthy_cell.py`, `asset_tumor_cell.py` and
+`asset_immune_cells.py` are implemented and validated. The three remaining
+`asset_*.py` and all six `animation_*.py` remain **API contracts only** — their
+entry points raise `NotImplementedError` with a note on what belongs there.
+That is intentional: the signatures are fixed now so nothing drifts, but no
+speculative geometry has been written.
 
-Validate the healthy cell asset and regenerate its test collection:
+Validate any asset and regenerate its test collection:
 
 ```sh
 blender --background --python blender/scripts/asset_healthy_cell.py
+blender --background --python blender/scripts/asset_tumor_cell.py
+blender --background --python blender/scripts/asset_immune_cells.py
 ```
 
-The five test cells live in `TEST_HealthyCells`, nested under `10_DEBUG` so
-that "never ship the debug tree" stays structural rather than a convention
-someone has to remember at export time.
+The test collections (`TEST_HealthyCells`, `TEST_TumorCells`,
+`TEST_ImmuneCells`) are nested under `10_DEBUG`, so excluding them from any
+future glTF export is structural rather than a convention someone has to
+remember at export time.
+
+### Visual legibility is not automatic
+
+A recurring finding across all three cell assets: **geometry, materials and
+naming can all validate while the model is unreadable.** Two translucent
+layers plus AgX rolloff will wash an interior out to a featureless pale ball
+until the cytoplasm alpha comes down and the nucleus colour deepens. Every
+cell asset was rendered and inspected at the camera distances it will
+actually be viewed at before being called done. Do not trust a green
+validator on its own for anything visual.
+
+Two related lessons:
+
+- **0.16 µm detail does not register.** Membrane ruffles sized to real
+  biology were invisible at every camera distance. They are now 0.30 µm.
+  Sub-visible detail is wasted geometry.
+- **Measure a cell by its mean vertex radius, not its bounding box.** An
+  amoeboid macrophage's lobes push the bounding box to ~20 µm against a
+  13 µm body. Where a declared size is claimed, the shape factor is
+  normalised by its own mean so the claim is true by construction.
 
 ---
 
@@ -163,11 +187,12 @@ blender/scripts/
     scene_tumor.py                # scene builder — real, working
 
     asset_healthy_cell.py         # CELL_HEALTHY_*
-    asset_tumor_cell.py           # CELL_TUMOR_*, CELL_TUMOR_NUCLEUS_*
-    asset_virus_hsv1.py           # VIRUS_HSV1_*
-    asset_immune_cells.py         # IMMUNE_TCELL_*, IMMUNE_NK_*, IMMUNE_DENDRITIC_*
-    asset_blood_vessel.py         # VESSEL_*
-    asset_ecm.py                  # ECM_FIBER_*
+    asset_tumor_cell.py           # CELL_TUMOR_*, CELL_TUMOR_RECEPTOR_*
+    asset_immune_cells.py         # IMMUNE_TCELL_*, IMMUNE_NK_*,
+                                  # IMMUNE_DENDRITIC_*, IMMUNE_MACROPHAGE_*
+    asset_virus_hsv1.py           # VIRUS_HSV1_*        (contract only)
+    asset_blood_vessel.py         # VESSEL_*            (contract only)
+    asset_ecm.py                  # ECM_FIBER_*         (contract only)
 
     animation_virus_entry.py      # frames    1-120
     animation_replication.py      # frames  120-240
@@ -361,11 +386,11 @@ without evaluating the camera's fcurves.
   conditional on performance anyway. `cycles.volume_bounces = 0` for now. Add
   it via a volume scatter on `WORLD_Master` once there is geometry to justify
   it.
-- **The remaining five asset scripts.** `asset_tumor_cell`, `asset_virus_hsv1`,
-  `asset_immune_cells`, `asset_blood_vessel` and `asset_ecm` are contracts only.
-  `asset_healthy_cell` is done and is the reference for how the others should
-  look: constants at module level, procedural geometry, a validator, and a
-  `create_*` entry point taking a seed.
+- **The remaining three asset scripts.** `asset_virus_hsv1`,
+  `asset_blood_vessel` and `asset_ecm` are contracts only. The three completed
+  cell assets are the reference for how the rest should look: constants at
+  module level, procedural geometry, a `create_*` entry point taking a seed,
+  a validator, and a render check before it is called done.
 - **All animation.** The six `animation_*.py` scripts are contracts only.
 - **glTF export.** Not yet wired. Read the export-scale note above first.
 
