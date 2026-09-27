@@ -36,13 +36,26 @@ import scene_tumor; scene_tumor.build()
 
 ## Current status
 
-**Scaffold only — no biological assets yet, by design.**
+Scaffold plus the first asset.
 
-Built and verified: 11 collections, 5 controllers, 4 cameras, 3 lights, world
-ambient, render settings. The 6 asset scripts and 6 animation scripts exist as
-**API contracts only**; their entry points raise `NotImplementedError` with a
-note on what belongs there. That is intentional — the signatures are fixed now
-so nothing drifts, but no speculative geometry has been written.
+**Built and verified:** 11 collections, 5 controllers, 4 cameras, 3 lights, world
+ambient, render settings.
+
+**Assets:** `asset_healthy_cell.py` is implemented and validated. The other
+five `asset_*.py` and all six `animation_*.py` remain **API contracts only** —
+their entry points raise `NotImplementedError` with a note on what belongs
+there. That is intentional: the signatures are fixed now so nothing drifts, but
+no speculative geometry has been written.
+
+Validate the healthy cell asset and regenerate its test collection:
+
+```sh
+blender --background --python blender/scripts/asset_healthy_cell.py
+```
+
+The five test cells live in `TEST_HealthyCells`, nested under `10_DEBUG` so
+that "never ship the debug tree" stays structural rather than a convention
+someone has to remember at export time.
 
 ---
 
@@ -110,7 +123,23 @@ Build them with `ut.obj_name("CELL_TUMOR", 1)` rather than string-formatting by
 hand, so the padding and the clamp stay consistent.
 
 Other prefixes in use: `CTRL_*` (controllers), `CAMERA_*`, `LIGHT_*`,
-`WORLD_*`.
+`WORLD_*`, `MOD_*` (modifiers), `TEX_*` (procedural textures).
+
+**Parts of a composite object** put the part before the ordinal:
+
+```
+CELL_HEALTHY_001                the cell
+CELL_HEALTHY_MEMBRANE_001       its membrane
+CELL_HEALTHY_CYTOPLASM_001      its cytoplasm
+CELL_HEALTHY_NUCLEUS_001        its nucleus
+CELL_HEALTHY_NUCLEOLUS_001      a nucleolus
+```
+
+A part is named for its **type and instance**, not for its parent, so
+`CELL_HEALTHY_NUCLEUS_001` is "the first healthy nucleus". Which cell a part
+belongs to is carried by **parenting**, which is authoritative — never infer it
+by parsing the name. That is why the nucleoli run to `_005` and beyond across
+the population: they share one ordinal space, and parenting disambiguates.
 
 **Materials** — `MAT_<Domain>_<Part>`. Domains are fixed:
 
@@ -175,7 +204,7 @@ instancing behave identically across the project.
 | `clear_animation(target)` | Stops a re-run stacking duplicate keyframes. |
 | `instance_linked(source, ...)` | Linked duplicate — one mesh, many objects. |
 | `instance_grid(...)` | Seeded, reproducible instancing over a grid. |
-| `principled_material(...)` | glTF-friendly material creation. |
+| `principled_material(...)` | glTF-friendly material creation. Create-or-update. |
 | `set_parent(obj, parent)` | Parenting that keeps world transform. |
 | `purge_orphans()` | Drops zero-user datablocks after a rebuild. |
 | `remove_startup_objects()` | Drops the factory Cube/Light/Camera. |
@@ -332,7 +361,11 @@ without evaluating the camera's fcurves.
   conditional on performance anyway. `cycles.volume_bounces = 0` for now. Add
   it via a volume scatter on `WORLD_Master` once there is geometry to justify
   it.
-- **All biological assets.** The six `asset_*.py` scripts are contracts only.
+- **The remaining five asset scripts.** `asset_tumor_cell`, `asset_virus_hsv1`,
+  `asset_immune_cells`, `asset_blood_vessel` and `asset_ecm` are contracts only.
+  `asset_healthy_cell` is done and is the reference for how the others should
+  look: constants at module level, procedural geometry, a validator, and a
+  `create_*` entry point taking a seed.
 - **All animation.** The six `animation_*.py` scripts are contracts only.
 - **glTF export.** Not yet wired. Read the export-scale note above first.
 

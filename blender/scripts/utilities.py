@@ -366,7 +366,14 @@ def principled_material(name, base_color=(0.5, 0.5, 0.5, 1.0), roughness: float 
                         emission_strength: float = 0.0, subsurface: float = 0.0,
                         subsurface_radius=(1.0, 0.2, 0.1), ior: float = 1.45,
                         alpha: float = 1.0):
-    """Create or fetch a glTF-friendly Principled BSDF material.
+    """Create or update a glTF-friendly Principled BSDF material.
+
+    Idempotent in the same way as :func:`get_or_create_object`: the material is
+    fetched by name and its inputs are rewritten, so a changed constant in a
+    builder actually takes effect on the next run. The alternative -- returning
+    an existing datablock untouched -- means editing a material constant
+    silently does nothing, which is worse than losing a hand-tweak in the UI.
+    Builders are authoritative; re-running one overwrites its own output.
 
     Only stock Principled inputs are used, with no procedural texture nodes.
     That is deliberate: the web viewer consumes a glTF export, and every
@@ -390,11 +397,7 @@ def principled_material(name, base_color=(0.5, 0.5, 0.5, 1.0), roughness: float 
     Returns:
         The material datablock.
     """
-    mat = bpy.data.materials.get(name)
-    if mat is not None:
-        return mat
-
-    mat = bpy.data.materials.new(name)
+    mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if bsdf is None:
