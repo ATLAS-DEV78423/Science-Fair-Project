@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 # ---------------------------------------------------------------------------
 # Project constants
@@ -234,13 +234,29 @@ def new_empty(name, collection, location=(0.0, 0.0, 0.0), parent=None,
 
 
 def set_parent(obj, parent) -> None:
-    """Parent *obj* to *parent* keeping its current world transform.
+    """Parent *obj* to *parent* with **parent-local** coordinates.
 
-    Uses the parent-inverse matrix rather than assuming an identity parent, so
-    re-parenting an already-positioned object does not make it jump.
+    Sets ``matrix_parent_inverse`` to identity explicitly, so after parenting
+    ``obj.location`` means "position within the parent" and the child follows
+    the parent exactly. That is the semantic every builder in this project
+    wants: geometry is authored around its own origin, and the root's
+    transform is what places it.
+
+    This was previously implicit and accidental. An earlier version read
+    ``parent.matrix_world`` to preserve the world transform, but that matrix
+    is still identity immediately after the parent is created, because the
+    depsgraph has not evaluated yet -- so the inverse came out identity
+    anyway and every asset happened to work. Stating it outright keeps the
+    behaviour identical while removing the dependency on evaluation order,
+    which is exactly the kind of thing that breaks silently on a later
+    Blender version.
+
+    Args:
+        obj: Object to reparent.
+        parent: New parent.
     """
     obj.parent = parent
-    obj.matrix_parent_inverse = parent.matrix_world.inverted()
+    obj.matrix_parent_inverse = Matrix.Identity(4)
 
 
 def instance_linked(source, name, collection, location=(0.0, 0.0, 0.0),

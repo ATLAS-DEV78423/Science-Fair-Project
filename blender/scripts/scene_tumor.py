@@ -44,11 +44,19 @@ FILL_LIGHT_WATTS = 9.0e4
 RIM_LIGHT_WATTS = 2.2e5
 
 #: name -> (focal_length_mm, location, aim_at)
+#:
+#: CAMERA_Virus sits ~1.15 BU from the origin, not the ~14 BU the other
+#: cameras use. An HSV-1 virion is ~200 nm across, which is 0.2 BU at this
+#: project's micrometre scale -- a hundredth the width of a 20 um cell. At
+#: 14 BU the virion was 3.8% of the frame width, which is unusable. A 100mm
+#: lens at 1.15 BU frames ~0.41 BU, so the virion fills about half the frame.
+#: The exploded structural diagram is ~1.4 BU tall, so it wants a Macro-style
+#: distance rather than this one.
 CAMERAS = {
     "CAMERA_Master": (35.0, (0.0, -200.0, 60.0), (0.0, 0.0, 0.0)),
     "CAMERA_Macro": (50.0, (60.0, -120.0, 30.0), (0.0, 0.0, 0.0)),
     "CAMERA_Cell": (85.0, (25.0, -55.0, 12.0), (0.0, 0.0, 0.0)),
-    "CAMERA_Virus": (100.0, (2.0, -14.0, 3.0), (0.0, 0.0, 0.0)),
+    "CAMERA_Virus": (100.0, (0.35, -1.00, 0.45), (0.0, 0.0, 0.0)),
 }
 
 #: Blender's default clip_start of 0.1 would clip a 0.2 BU virion entirely.

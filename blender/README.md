@@ -41,12 +41,12 @@ Scaffold plus the first asset.
 **Built and verified:** 11 collections, 5 controllers, 4 cameras, 3 lights, world
 ambient, render settings.
 
-**Assets:** `asset_healthy_cell.py`, `asset_tumor_cell.py` and
-`asset_immune_cells.py` are implemented and validated. The three remaining
-`asset_*.py` and all six `animation_*.py` remain **API contracts only** — their
-entry points raise `NotImplementedError` with a note on what belongs there.
-That is intentional: the signatures are fixed now so nothing drifts, but no
-speculative geometry has been written.
+**Assets:** `asset_healthy_cell.py`, `asset_tumor_cell.py`,
+`asset_immune_cells.py` and `asset_virus_hsv1.py` are implemented and
+validated. The two remaining `asset_*.py` and all six `animation_*.py` remain
+**API contracts only** — their entry points raise `NotImplementedError` with a
+note on what belongs there. That is intentional: the signatures are fixed now
+so nothing drifts, but no speculative geometry has been written.
 
 Validate any asset and regenerate its test collection:
 
@@ -54,12 +54,13 @@ Validate any asset and regenerate its test collection:
 blender --background --python blender/scripts/asset_healthy_cell.py
 blender --background --python blender/scripts/asset_tumor_cell.py
 blender --background --python blender/scripts/asset_immune_cells.py
+blender --background --python blender/scripts/asset_virus_hsv1.py
 ```
 
 The test collections (`TEST_HealthyCells`, `TEST_TumorCells`,
-`TEST_ImmuneCells`) are nested under `10_DEBUG`, so excluding them from any
-future glTF export is structural rather than a convention someone has to
-remember at export time.
+`TEST_ImmuneCells`, `TEST_HSV1_Virions`) are nested under `10_DEBUG`, so
+excluding them from any future glTF export is structural rather than a
+convention someone has to remember at export time.
 
 ### Visual legibility is not automatic
 
@@ -159,6 +160,11 @@ CELL_HEALTHY_NUCLEUS_001        its nucleus
 CELL_HEALTHY_NUCLEOLUS_001      a nucleolus
 ```
 
+The virion is the one exception to the uppercase convention: the brief
+specifies `VIRUS_HSV1_Envelope`, `VIRUS_HSV1_Capsid` and so on in mixed case,
+so that is what they are called. Worth normalising if the rest of the project
+is ever read by a tool that expects case-consistent part names.
+
 A part is named for its **type and instance**, not for its parent, so
 `CELL_HEALTHY_NUCLEUS_001` is "the first healthy nucleus". Which cell a part
 belongs to is carried by **parenting**, which is authoritative — never infer it
@@ -190,7 +196,7 @@ blender/scripts/
     asset_tumor_cell.py           # CELL_TUMOR_*, CELL_TUMOR_RECEPTOR_*
     asset_immune_cells.py         # IMMUNE_TCELL_*, IMMUNE_NK_*,
                                   # IMMUNE_DENDRITIC_*, IMMUNE_MACROPHAGE_*
-    asset_virus_hsv1.py           # VIRUS_HSV1_*        (contract only)
+    asset_virus_hsv1.py           # VIRUS_HSV1_*
     asset_blood_vessel.py         # VESSEL_*            (contract only)
     asset_ecm.py                  # ECM_FIBER_*         (contract only)
 
@@ -372,7 +378,7 @@ plausibility goal.
 | `CAMERA_Master` | 35 mm | Establishing, open and close. Scene camera. |
 | `CAMERA_Macro` | 50 mm | Spread. Holds several cells plus surrounding matrix. |
 | `CAMERA_Cell` | 85 mm | Replication through immune response. |
-| `CAMERA_Virus` | 100 mm | Entry and replication, where the virion is 0.2 µm. |
+| `CAMERA_Virus` | 100 mm | Entry and replication, where the virion is 0.2 µm. Sits **1.15 BU** out, not the ~14 BU the others use. |
 
 Unkeyed for now. `animation_full_sequence.py` will cut between them with
 timeline markers rather than camera keyframes, so the web viewer can seek
@@ -386,11 +392,11 @@ without evaluating the camera's fcurves.
   conditional on performance anyway. `cycles.volume_bounces = 0` for now. Add
   it via a volume scatter on `WORLD_Master` once there is geometry to justify
   it.
-- **The remaining three asset scripts.** `asset_virus_hsv1`,
-  `asset_blood_vessel` and `asset_ecm` are contracts only. The three completed
-  cell assets are the reference for how the rest should look: constants at
-  module level, procedural geometry, a `create_*` entry point taking a seed,
-  a validator, and a render check before it is called done.
+- **The remaining two asset scripts.** `asset_blood_vessel` and `asset_ecm`
+  are contracts only. The four completed assets are the reference for how the
+  rest should look: constants at module level, procedural geometry, a
+  `create_*` entry point taking a seed, a validator, and a render check before
+  it is called done.
 - **All animation.** The six `animation_*.py` scripts are contracts only.
 - **glTF export.** Not yet wired. Read the export-scale note above first.
 
