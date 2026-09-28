@@ -93,6 +93,8 @@ TEST_COLLECTION = "TEST_BloodVessel"
 
 PREFIX = "VESSEL"
 PREFIX_RBC = "RBC_DISC"
+PREFIX_PLATELET = "PLATELET"
+PREFIX_WBC = "WBC"
 PREFIX_PATH = "VESSEL_PATH"
 
 SUFFIX_OUTER_WALL = "OUTER_WALL"
@@ -145,14 +147,11 @@ RBC_COUNT = 15
 #: Keep cells off the wall: a fraction of the room actually available between
 #: the lumen surface and the outermost a cell can reach.
 RBC_WALL_CLEARANCE = 0.72
-#: A cell is a disc, not a point, and it is randomly tilted, so its outer edge
-#: reaches further than its radius. Without this margin a tilted disc pokes
-#: through the lumen surface -- the exact artefact the hollow build exists to
-#: avoid.
+#: A blood component is a finite object, not a point, and it is randomly
+#: tilted, so its outer edge reaches further than its own radius. Without this
+#: margin a tilted disc pokes through the lumen surface -- the exact artefact
+#: the hollow build exists to avoid.
 RBC_CLEARANCE_MARGIN = 1.35
-
-#: Slight size variation between cells, so a packed lumen is not a grid.
-RBC_SIZE_JITTER = 0.12
 
 #: Tolerance when comparing a cell's *measured* centreline distance against the
 #: radius it was *placed* at. These differ by a fraction of a micrometre
@@ -162,12 +161,82 @@ RBC_SIZE_JITTER = 0.12
 #: only relaxes the self-consistency check, and the residual is bounded.
 RBC_FRAME_ROLL_TOLERANCE_UM = 0.5
 
+# ---------------------------------------------------------------------------
+# Platelets
+# ---------------------------------------------------------------------------
+
+#: ~2-3 um across, versus 7.5 for a red blood cell, so they are a third of the
+#: width and are easy to lose in a crowded lumen.
+PLATELET_DIAMETER_UM = 2.5
+#: A platelet is a cell *fragment*, not a cell: no nucleus, and biconvex rather
+#: than biconcave, which is why the two disc profiles differ only in which of
+#: centre/rim is thicker. See :func:`_disc_mesh`.
+PLATELET_CENTRE_THICKNESS_UM = 0.55
+PLATELET_RIM_THICKNESS_UM = 0.18
+#: Fewer profile points than a red blood cell. At a third the diameter, with
+#: the same count, the silhouette turns faceted.
+PLATELET_PROFILE_STEPS = 6
+PLATELET_SPIN_STEPS = 12
+
+# ---------------------------------------------------------------------------
+# White blood cells
+# ---------------------------------------------------------------------------
+
+#: Circulating white cells, as (prefix, builder name, scale) triples. These are
+#: the project's existing immune cell meshes rather than new geometry: a
+#: lymphocyte and a monocyte are real blood white cells, and reusing them means
+#: the cells in the vessel are the same cells the animation shows in tissue.
+#:
+#: The monocyte is scaled down because :mod:`asset_immune_cells` models a
+#: *tissue* macrophage at ~12.9 um radius, which is larger than a circulating
+#: monocyte (7-10 um) and would not fit a venule at all. The lymphocyte is
+#: used as built.
+WBC_CLASSES = (
+    ("LYMPHOCYTE", "create_tcell", 1.0),
+    ("MONOCYTE", "create_macrophage", 0.60),
+)
+
+#: Every ``vessel_class`` value a blood component instance can carry. Sources
+#: and instances both use these, which is what lets the validator look up a
+#: class's extent without matching on object names.
+BLOOD_CLASSES = ("RED_BLOOD_CELL", "PLATELET") + tuple(
+    label for label, _, _ in WBC_CLASSES)
+
+#: How many white cells a default vessel carries. Real blood has roughly one
+#: per 500 red cells; at that ratio a viewer sees red cells and nothing else.
+#: See :data:`PLATELETS_PER_RBC` for the same trade-off on platelets.
+WBC_COUNT = 2
+
+# ---------------------------------------------------------------------------
+# Component ratios -- deliberately exaggerated
+# ---------------------------------------------------------------------------
+
+#: One platelet per this many red blood cells. Real blood is nearer 1:10 to
+#: 1:20, which at any visible count of red cells is one or two platelets
+#: scrolling past. :data:`PLATELETS_PER_RBC` is a visualisation choice, not a
+#: claim about haematology, and the docstring says so.
+PLATELETS_PER_RBC = 6
+#: Floor on platelets per vessel, so that a small vessel still shows the
+#: component at all rather than dropping to zero by arithmetic.
+MIN_PLATELETS = 3
+#: Sizes are jittered per instance for all three components, so a lumen is not
+#: a grid of identical objects.
+COMPONENT_SIZE_JITTER = 0.12
+
+#: Scratch collection the immune cells are built in while their parts are merged
+#: into a white cell source mesh. Removed again immediately.
+SCRATCH_COLLECTION = "_SCRATCH_BloodComponents"
+
 PROP_CLASS = "vessel_class"
 PROP_NOTE = "representation_note"
-#: Set on the one red blood cell that is the shared source mesh rather than an
-#: instance of it. Lets the validator tell the source from its instances
-#: without matching on a name, which is how the source gets renamed.
-PROP_RBC_SOURCE = "rbc_source"
+#: True on the one source object per blood component, False on its instances.
+#: Lets the validator tell sources from instances without matching on a name,
+#: which is how a source gets renamed.
+PROP_SOURCE = "blood_source"
+#: How much room the source needs in the lumen, in micrometres. Written by the
+#: builder from the source's own geometry and read back by the validator, so
+#: the two cannot disagree about what fits.
+PROP_EXTENT = "blood_extent_um"
 
 ILLUSTRATIVE_NOTE = ("Conceptual representation of tumour-associated "
                      "vasculature; not an anatomically accurate vessel.")
@@ -231,6 +300,20 @@ MAT_RBC = dict(
     emission=(1.00, 0.20, 0.16, 1.0),
 )
 
+#: Platelets are pale and slightly translucent, not red. Colouring them like red
+#: blood cells would imply they are the same thing, which is the one thing they
+#: are not: they are colourless cell fragments whose real colour comes from
+#: whatever they have coated themselves in. Pale grey-lilac is close enough to
+#: read correctly against the lumen and different enough to tell apart.
+MAT_PLATELET = dict(
+    name="MAT_Platelet",
+    base_color=(0.78, 0.74, 0.80, 1.0),
+    roughness=0.35,
+    subsurface=0.25,
+    alpha=0.85,
+    emission=(0.88, 0.85, 0.95, 1.0),
+)
+
 
 def _material(spec: dict):
     """Build one :data:`MAT_*` material. Emission strength starts at zero."""
@@ -242,31 +325,50 @@ def _material(spec: dict):
 
 
 def ensure_materials() -> dict:
-    """Create or update all four vessel materials. Idempotent."""
+    """Create or update this module's own materials. Idempotent.
+
+    Deliberately does *not* cover white blood cells: those carry the immune
+    cell asset's own materials across from their source meshes, so a white cell
+    in a vessel looks exactly like the same cell in tissue.
+    """
     return {key: _material(spec) for key, spec in (
         ("wall", MAT_WALL), ("endothelium", MAT_ENDOTHELIAL),
-        ("lumen", MAT_LUMEN), ("rbc", MAT_RBC))}
+        ("lumen", MAT_LUMEN), ("rbc", MAT_RBC), ("platelet", MAT_PLATELET))}
 
 
-def _rbc_extent() -> float:
-    """Half-extent a randomly tilted disc presents to the lumen.
+def _extent(mesh, margin: float = None) -> float:
+    """Half-extent a randomly tilted blood component presents to the lumen.
 
-    Deliberately larger than the cell radius: a tilted disc's outer edge
-    reaches past its own radius, and a cell placed exactly one radius from the
-    centreline pokes through the wall about half the time.
+    Measured as the mesh's *maximum* vertex radius, not its mean. For
+    containment the question is "does the furthest point reach the wall", and
+    for a disc the furthest point is the rim: a red blood cell reaches 3.75 um
+    however much of its surface is dished in towards the middle, so its mean
+    vertex radius of 2.39 um understates it by a third. An earlier version used
+    the mean, following the cell assets' convention of normalising declared
+    size by the mean -- but that convention exists to stop an amoeboid
+    *macrophage's lobes* inflating a size claim, and here it quietly let a
+    2.5 um platelet through a 1.3 um capillary lumen. Containment wants the
+    conservative number, so this takes the maximum.
+
+    The margin on top accounts for tilt: a tilted object reaches past its own
+    radius, and something placed exactly one radius from the centreline pokes
+    through the wall about half the time.
     """
-    return RBC_DIAMETER_UM * 0.5 * RBC_CLEARANCE_MARGIN
+    margin = RBC_CLEARANCE_MARGIN if margin is None else margin
+    if not mesh.vertices:
+        return 0.0
+    return max(v.co.length for v in mesh.vertices) * margin
 
 
-def _placement_radius(lumen_radius: float) -> float:
-    """How far off the centreline a cell centre may sit and stay inside.
+def _placement_radius(lumen_radius: float, extent: float) -> float:
+    """How far off the centreline a component may sit and stay inside.
 
     Shared by the builder and the validator on purpose. When these two
-    disagreed about where a cell fits, the validator would report a correctly
-    built vessel as broken -- which is the same class of bug that made an
-    earlier version of this project measure declared radius two different ways.
+    disagreed about what fits, the validator would report a correctly built
+    vessel as broken -- which is the same class of bug that made an earlier
+    version of this project measure declared radius two different ways.
     """
-    return max(lumen_radius - _rbc_extent(), 0.0) * RBC_WALL_CLEARANCE
+    return max(lumen_radius - extent, 0.0) * RBC_WALL_CLEARANCE
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +561,9 @@ def _tube_mesh(name: str, frames: list, radius: float, factor, *,
     return mesh
 
 
-def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
-    """A biconcave disc: an RBC, spun from a profile.
+def _disc_mesh(name: str, diameter: float, centre_thickness: float,
+               rim_thickness: float, steps: int = 9, spin: int = 20) -> object:
+    """A disc of revolution: a blood platelet, or a red blood cell.
 
     The profile is the cell's cross-section: an open polyline running from the
     centre of one face, out over the rim, and back to the centre of the other
@@ -470,28 +573,35 @@ def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
 
     Both faces are in the profile, which is the part that is easy to get wrong:
     a profile running only from rim to centre revolves into an open bowl, not
-    a disc. And the dimple is what makes it a red blood cell rather than a
-    lentil -- it is why the cell deforms to squeeze through a capillary
-    narrower than itself, which the test scene checks by building one.
+    a disc.
+
+    Which of the two shapes you get is entirely the relationship between
+    *centre_thickness* and *rim_thickness*:
+
+    * rim thicker than centre -> **biconcave**, a red blood cell. The dimple is
+      what makes it an RBC rather than a lentil, and it is why the cell
+      deforms to squeeze through a capillary narrower than itself -- which the
+      test scene checks by building one.
+    * centre thicker than rim -> **biconvex**, a lens. That is a platelet.
+
+    Two near-identical spin functions would have been the alternative; this is
+    one function and two callers.
 
     The disc ends up lying on its side, axis along Y. That is harmless and
     cheaper to fix than to special-case: the discs are randomly rotated anyway.
     """
-    half = RBC_DIAMETER_UM * 0.5
-    dimple = RBC_HALF_THICKNESS_UM * RBC_DIMPLE
-    rim = RBC_HALF_THICKNESS_UM
+    half = diameter * 0.5
 
-    # s sweeps 0 at the face centre to 1 at the rim. The order matters twice
-    # over: the profile's *ends* have to be the on-axis points, or the revolve
-    # leaves a hole at the rim instead of closing there. And thickness has to
-    # grow towards the rim, or the disc comes out biconvex -- a lens, not a red
-    # blood cell.
+    # s sweeps 0 at the face centre to 1 at the rim. The order matters: the
+    # profile's *ends* have to be the on-axis points, or the revolve leaves a
+    # hole at the rim instead of closing there.
     half_profile = []
-    for i in range(RBC_PROFILE_STEPS + 1):
-        s = i / float(RBC_PROFILE_STEPS)
+    for i in range(steps + 1):
+        s = i / float(steps)
         # Smoothstep so the dimple and the rim both curve instead of creasing.
         eased = s * s * (3.0 - 2.0 * s)
-        half_profile.append((half * eased, dimple + (rim - dimple) * eased))
+        half_profile.append((half * eased,
+                             centre_thickness + (rim_thickness - centre_thickness) * eased))
 
     # Centre of the top face, out over the rim, back to the centre of the
     # bottom face. Open, with both endpoints on the axis.
@@ -509,7 +619,7 @@ def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
              for i in range(len(verts) - 1)]
     bmesh.ops.spin(bm, geom=chain + verts, axis=(0.0, 0.0, 1.0),
                    cent=(0.0, 0.0, 0.0), dvec=(0.0, 0.0, 0.0),
-                   angle=2.0 * math.pi, steps=RBC_SPIN_STEPS, use_merge=True)
+                   angle=2.0 * math.pi, steps=spin, use_merge=True)
     # Weld the seam and the two on-axis poles, then dissolve what the welding
     # left behind. Order matters: removing the doubles is what collapses the
     # seam ring and the axis points into single vertices, and *that* is what
@@ -523,6 +633,89 @@ def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
     bm.free()
     mesh.shade_smooth()
     return mesh
+
+
+def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
+    """A biconcave disc: a red blood cell. See :func:`_disc_mesh`."""
+    return _disc_mesh(name, RBC_DIAMETER_UM,
+                      RBC_HALF_THICKNESS_UM * RBC_DIMPLE, RBC_HALF_THICKNESS_UM,
+                      steps=RBC_PROFILE_STEPS, spin=RBC_SPIN_STEPS)
+
+
+def _platelet_mesh(name: str = "MESH_{}".format(PREFIX_PLATELET)) -> object:
+    """A biconvex lens: a platelet. See :func:`_disc_mesh`.
+
+    Smaller and flatter than an RBC, and convex rather than concave: platelets
+    are cell fragments, not cells, which is why they have no nucleus and why
+    the shape is the opposite. The colour is pale rather than red for the same
+    reason they are not a red blood cell.
+    """
+    return _disc_mesh(name, PLATELET_DIAMETER_UM,
+                      PLATELET_CENTRE_THICKNESS_UM, PLATELET_RIM_THICKNESS_UM,
+                      steps=PLATELET_PROFILE_STEPS, spin=PLATELET_SPIN_STEPS)
+
+
+def _wbc_mesh(name: str, cell, scale: float) -> object:
+    """Flatten an immune cell's parts into one mesh, so a WBC is one object.
+
+    The immune cell asset builds each cell as a root empty with membrane,
+    cytoplasm and nucleus underneath. That is the right shape for *tissue*,
+    where the parts animate independently -- but a white blood cell travelling
+    down a vessel is one object, and instancing needs one datablock. So the
+    part meshes are copied into a single bmesh, transformed into place, and
+    left alone: the originals are shared datablocks that other cells use, and
+    editing them here would change every lymphocyte in the scene.
+
+    Material slots are carried across and remapped rather than flattened. A
+    merged cell with a single material loses the translucent membrane over a
+    visible nucleus, and a white blood cell that reads as a solid blob is not
+    worth the saved object count.
+
+    Args:
+        name: Name for the new mesh.
+        cell: The immune cell root object.
+        scale: Uniform scale. Tissue macrophages are bigger than circulating
+            monocytes, so the monocyte uses a scale below 1.
+    """
+    parts = [p for p in sorted(cell.children_recursive, key=lambda o: o.name)
+             if p.type == "MESH"]
+    if not parts:
+        raise ValueError("no mesh parts under {!r}".format(cell.name))
+
+    materials = []
+    material_slots = {}
+    bm = bmesh.new()
+    for part in parts:
+        matrix = part.matrix_local @ Matrix.Diagonal((scale, scale, scale, 1.0))
+
+        slots = []
+        for material in part.data.materials:
+            if material.name not in material_slots:
+                material_slots[material.name] = len(materials)
+                materials.append(material)
+            slots.append(material_slots[material.name])
+
+        # poly.vertices holds vertex *indices*, so the copy has to be an
+        # index-aligned list rather than a dict keyed by vertex object.
+        vertices = [bm.verts.new(matrix @ v.co) for v in part.data.vertices]
+        for poly in part.data.polygons:
+            try:
+                face = bm.faces.new([vertices[i] for i in poly.vertices])
+            except ValueError:
+                continue          # duplicate face, already contributed
+            if poly.material_index < len(slots):
+                face.material_index = slots[poly.material_index]
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    for material in materials:
+        mesh.materials.append(material)
+    mesh.shade_smooth()
+    return mesh
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +751,30 @@ def _path_object(name: str, points: list, collection, parent=None):
 # ---------------------------------------------------------------------------
 
 
+def _finish_source(obj, collection, location, parent, mesh_name=None):
+    """Common tail for every blood-component source object.
+
+    Sources are hidden from render and viewport: their job is to be the
+    datablock, not to be seen. And each carries its own ``blood_extent_um``,
+    which is the single source of truth for how much room it needs. The
+    validator reads that rather than recomputing an extent of its own, so the
+    two cannot drift apart -- which is exactly the mistake this module already
+    made once, measuring radius two different ways.
+    """
+    if location is not None:
+        obj.location = location
+    if parent is not None:
+        ut.set_parent(obj, parent)
+    if not obj.data.materials:
+        obj.data.materials.append(ut.principled_material(
+            "MAT_{}_Default".format(obj.name), base_color=(0.8, 0.4, 0.4, 1.0)))
+    obj[PROP_SOURCE] = True
+    obj[PROP_EXTENT] = round(_extent(obj.data), 4)
+    obj.hide_render = True
+    obj.hide_viewport = True
+    return obj
+
+
 def create_red_blood_cell(index: int = 1, collection=None,
                           location=(0.0, 0.0, 0.0), parent=None):
     """Create the shared red blood cell: a simple biconcave disc.
@@ -565,8 +782,7 @@ def create_red_blood_cell(index: int = 1, collection=None,
     One source object for the whole project, shared by every vessel's cells.
     This is the *source* that everything else instances, which is why it is
     the one red blood cell in the scene that is not an instance -- there has to
-    be something to instance. It is hidden from render and viewport, because
-    its job is to be the datablock, not to be seen.
+    be something to instance.
 
     Calling this more than once returns the same object rather than piling up
     near-duplicates, which is the same rule every other builder here follows.
@@ -574,9 +790,9 @@ def create_red_blood_cell(index: int = 1, collection=None,
     Args:
         index: 1-based ordinal, used for the object name.
         collection: Target collection. Defaults to ``05_BLOOD_VESSELS``.
-        location: World-space location.
-        parent: Optional parent object. Left alone by default, so the source
-            is not dragged around when a vessel root moves.
+        location: World-space location. Left unparented by default, so the
+            source is not dragged around when a vessel root moves.
+        parent: Optional parent object.
 
     Returns:
         The shared red blood cell object.
@@ -584,29 +800,200 @@ def create_red_blood_cell(index: int = 1, collection=None,
     coll = collection or ut.resolve_collection(COLLECTION)
     obj = ut.get_or_create_object(
         ut.obj_name(PREFIX_RBC, index), coll,
-        lambda n: _rbc_mesh("MESH_{}".format(n)), location=location)
-    if parent is not None:
-        ut.set_parent(obj, parent)
+        lambda n: _rbc_mesh("MESH_{}".format(n)))
     ut.assign_material(obj, ensure_materials()["rbc"])
-    obj[PROP_RBC_SOURCE] = True
-    obj.hide_render = True
-    obj.hide_viewport = True
-    return obj
+    obj[PROP_CLASS] = "RED_BLOOD_CELL"
+    return _finish_source(obj, coll, location, parent)
+
+
+def create_platelet(index: int = 1, collection=None,
+                    location=(0.0, 0.0, 0.0), parent=None):
+    """Create the shared platelet: a small biconvex lens.
+
+    The third formed element of blood, alongside red cells and white cells.
+    A platelet is a cell *fragment* shed from a megakaryocyte rather than a
+    cell in its own right, which is why it has no nucleus, is a third of a red
+    cell's width, and is biconvex where a red cell is biconcave.
+
+    One shared source for the whole project, as with the red blood cell.
+
+    Args:
+        index: 1-based ordinal, used for the object name.
+        collection: Target collection. Defaults to ``05_BLOOD_VESSELS``.
+        location: World-space location.
+        parent: Optional parent object.
+
+    Returns:
+        The shared platelet object.
+    """
+    coll = collection or ut.resolve_collection(COLLECTION)
+    obj = ut.get_or_create_object(
+        ut.obj_name(PREFIX_PLATELET, index), coll,
+        lambda n: _platelet_mesh("MESH_{}".format(n)))
+    ut.assign_material(obj, ensure_materials()["platelet"])
+    obj[PROP_CLASS] = "PLATELET"
+    return _finish_source(obj, coll, location, parent)
+
+
+def create_white_blood_cells(collection=None, seed: int = 0) -> dict:
+    """Create the shared white blood cell sources, one per class in :data:`WBC_CLASSES`.
+
+    These are the project's own immune cell meshes, harvested into single
+    instanced meshes. That is a deliberate reuse: a lymphocyte and a monocyte
+    are real blood white cells, and it means the cell seen travelling in a
+    vessel is the same cell the animation later shows in tissue, rather than a
+    second, subtly different model of it.
+
+    The immune cells are built into a scratch collection and removed once their
+    parts have been merged. Their part meshes are shared datablocks, so nothing
+    is deleted -- only the temporary objects.
+
+    Args:
+        collection: Target collection for the sources. Defaults to
+            ``05_BLOOD_VESSELS``.
+        seed: Passed to the immune cell builders, so the harvested geometry is
+            reproducible.
+
+    Returns:
+        A dict of class label to source object, e.g. ``{"LYMPHOCYTE": obj}``.
+    """
+    coll = collection or ut.resolve_collection(COLLECTION)
+    import asset_immune_cells as ic
+
+    sources = {}
+    for label, builder_name, scale in WBC_CLASSES:
+        name = ut.obj_name("{}_{}".format(PREFIX_WBC, label), 1)
+        obj = bpy.data.objects.get(name)
+        if obj is None:
+            scratch = ut.get_or_create_collection(SCRATCH_COLLECTION)
+            built = getattr(ic, builder_name)(location=(0.0, 0.0, 0.0),
+                                              seed=seed, index=999,
+                                              collection=scratch)
+            # The immune cell builders return a dict of parts, not the root
+            # object, so take the root out of it.
+            cell = built["root"]
+            mesh = _wbc_mesh("MESH_{}".format(name), cell, scale)
+            obj = ut.get_or_create_object(name, coll, lambda n, m=mesh: m)
+
+            # Drop the temporary cell, leaving its shared part meshes alone.
+            for victim in [cell] + list(cell.children_recursive):
+                bpy.data.objects.remove(victim, do_unlink=True)
+            if not scratch.objects and not scratch.children:
+                bpy.data.collections.remove(scratch)
+        obj[PROP_CLASS] = label
+        _finish_source(obj, coll, (0.0, 0.0, 0.0), None)
+        sources[label] = obj
+    return sources
+
+
+def _place_component(source, prefix: str, count: int, frames, lumen_radius: float,
+                     rng, vessel_class: str, path, root, coll,
+                     spread: float = 1.0) -> list:
+    """Instance *count* copies of *source* along the vessel, and return them.
+
+    One function for all three blood components. Placement is in the vessel's
+    local space: each component is positioned relative to the centreline and
+    then constrained onto the path, so moving the vessel root carries the whole
+    blood column with it.
+
+    Args:
+        source: The shared source object to instance.
+        prefix: Name prefix for the instances.
+        count: How many to place. Zero is allowed and means "this component
+            does not appear in this vessel" -- a capillary carries no red cells
+            because none would fit.
+        frames: Parallel-transport frames, one per station.
+        lumen_radius: Inner radius, used to size the placement allowance.
+        rng: Seeded RNG for reproducible jitter.
+        vessel_class: Value written to each instance's ``vessel_class``.
+        path: The flow path curve.
+        root: The vessel root to parent to.
+        coll: Owning collection.
+        spread: Fraction of the path length this component occupies. Red cells
+            fill the vessel; a couple of white cells occupy a stretch of it.
+
+    Returns:
+        The list of created objects.
+    """
+    made = []
+    if count <= 0:
+        return made
+
+    extent = source[PROP_EXTENT]
+    clearance = _placement_radius(lumen_radius, extent)
+    # First instance is index 2: index 1 is the shared source.
+    for i in range(count):
+        # Spread the run along the vessel, then jitter within it.
+        base = spread * (i + 0.5) / float(count)
+        u = min(0.995, max(0.005, (0.5 - spread * 0.5) + spread * base
+                           + rng.uniform(-0.35, 0.35) * spread / count))
+        # Deterministic offset within the tube, on a loose spiral so the
+        # components do not line up in a single row.
+        angle = u * 9.4 * math.pi + rng.uniform(-0.35, 0.35)
+        distance = clearance * math.sqrt(rng.uniform(0.05, 1.0))
+        radial = Vector((math.cos(angle) * distance,
+                         math.sin(angle) * distance, 0.0))
+        # Express the offset in the *path's own frame* at this station, not in
+        # root space. Follow Path applies the component's location in the
+        # curve's frame, so a root-space offset is remapped by the tangent
+        # rotation and ends up pointing partly along the vessel -- on a curving
+        # path that puts it measurably further from the centreline than it was
+        # placed, which is how cells ended up within a hair of the wall.
+        station = min(int(round(u * (len(frames) - 1))), len(frames) - 1)
+        local = frames[station].to_3x3() @ radial
+
+        size = 1.0 + rng.uniform(-COMPONENT_SIZE_JITTER, COMPONENT_SIZE_JITTER)
+        obj = ut.instance_linked(
+            source, ut.obj_name(prefix, i + 2), coll, location=local,
+            rotation=(rng.uniform(0.0, math.pi), rng.uniform(0.0, math.pi),
+                      rng.uniform(0.0, math.pi)),
+            scale=(size, size, size), parent=root)
+        obj[PROP_SOURCE] = False
+        follow = obj.constraints.new("FOLLOW_PATH")
+        follow.name = "FLOW"
+        follow.target = path
+        follow.use_curve_follow = True
+        follow.forward_axis = "TRACK_NEGATIVE_Z"
+        follow.up_axis = "UP_Y"
+        # Required, and easy to miss. With use_fixed_location off, Follow Path
+        # ignores offset_factor entirely and uses the frame-based `offset`
+        # instead, so every component collapses onto frame 1's position on the
+        # path -- the whole blood column piles up at one end of the vessel,
+        # while the offset_factor values look perfectly correct in the UI.
+        follow.use_fixed_location = True
+        # Spread along the path so a keyframe on offset_factor moves each
+        # component from a different start point, which is what makes flow read
+        # as flow.
+        follow.offset_factor = u
+        obj[PROP_CLASS] = vessel_class
+        made.append(obj)
+    return made
 
 
 def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
-                        rbc_count: int = RBC_COUNT, index: int = 1,
+                        rbc_count: int = RBC_COUNT, wbc_count: int = WBC_COUNT,
+                        platelet_count: int = None, index: int = 1,
                         collection=None, parent=None, seed: int = 0) -> dict:
-    """Create a blood vessel along *path_points*.
+    """Create a blood vessel along *path_points*, with its blood contents.
 
-    Builds three nested shells and a scatter of instanced red blood cells. The
-    wall is opaque, the endothelial lining translucent, and the lumen surface
-    dark, so the red blood cells are visible from outside while the vessel
-    still reads as a solid tube.
+    Builds three nested shells and a suspension inside them: red blood cells,
+    platelets, and white blood cells. All three are instanced from one shared
+    source mesh each, so a full vessel costs a handful of datablocks rather
+    than one per object.
 
-    Nothing is animated. The centreline is kept as a curve and every red
-    blood cell carries a Follow Path constraint, so blood flow later is a
-    matter of keying ``offset_factor`` per cell and nothing else.
+    All three shells are translucent, including the lumen, because the lumen
+    surface is the *near* one from any viewpoint: an opaque lumen hides the
+    contents just as thoroughly as an opaque wall.
+
+    Nothing is animated. The centreline is kept as a curve and every component
+    carries a Follow Path constraint, so blood flow later is a matter of
+    keying ``offset_factor`` per object and nothing else.
+
+    **The component ratios are exaggerated.** Real blood is roughly 500 red
+    cells per white cell and 10-20 red cells per platelet; at those ratios a
+    viewer sees red cells and nothing else. The ratios here are chosen so the
+    suspension reads as mixed. This is a visualisation decision and is not a
+    claim about haematology.
 
     Args:
         path_points: Sequence of at least 2 world-space points defining the
@@ -614,23 +1001,32 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
         radius: Lumen-scale outer radius in micrometres. Use
             :data:`VENULE_RADIUS_UM` for a readable vessel;
             :data:`CAPILLARY_RADIUS_UM` is faithful but barely wider than one
-            red blood cell.
-        rbc_count: Number of red blood cells to place. All share one mesh.
+            red blood cell, and carries no cells at all.
+        rbc_count: Number of red blood cells. All share one mesh.
+        wbc_count: Number of white blood cells, split across the classes in
+            :data:`WBC_CLASSES`.
+        platelet_count: Number of platelets. Defaults to ``rbc_count //
+            PLATELETS_PER_RBC``, with a floor of :data:`MIN_PLATELETS`.
         index: 1-based ordinal, used for the object names.
         collection: Target collection. Defaults to ``05_BLOOD_VESSELS``.
         parent: Optional parent object.
         seed: Controls all variation. Same seed, same vessel, every time.
 
     Returns:
-        A dict with the shell objects, the path object, the red blood cell
-        source and the instances, under the keys ``"wall"``, ``"endothelium"``,
-        ``"lumen"``, ``"path"``, ``"rbc_source"``, ``"rbcs"`` and ``"root"``.
+        A dict with the shell objects under ``"wall"``, ``"endothelium"`` and
+        ``"lumen"``; the flow path under ``"path"``; the vessel root under
+        ``"root"``; each component's instances under ``"rbcs"``,
+        ``"platelets"`` and ``"wbcs"``; and each component's shared source
+        under ``"rbc_source"``, ``"platelet_source"`` and ``"wbc_sources"``.
     """
     if radius <= 0.0:
         raise ValueError("radius must be positive, got {}".format(radius))
     coll = collection or ut.resolve_collection(COLLECTION)
     rng = random.Random(seed)
     materials = ensure_materials()
+
+    if platelet_count is None:
+        platelet_count = max(MIN_PLATELETS, rbc_count // PLATELETS_PER_RBC)
 
     stations = _resample_even(_catmull_rom(path_points), STATIONS)
     frames = _parallel_frames(stations)
@@ -660,61 +1056,47 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
     path = _path_object(ut.obj_name(PREFIX_PATH, index), stations, coll,
                         parent=root)
 
-    # --- red blood cells ---------------------------------------------------
-    # Placement is in the vessel's local space: the cells are positioned on the
-    # centreline and then constrained onto the path, so moving the vessel root
-    # carries the whole blood column with it. The source is shared across every
-    # vessel in the project, so only the instance *names* are per-vessel.
+    # --- the blood ---------------------------------------------------------
+    # Sources are shared across every vessel in the project, so only the
+    # instance *names* are per-vessel.
     rbc_source = create_red_blood_cell(index=1, collection=coll)
-    rbc_prefix = ut.obj_name(PREFIX_RBC, index)
+    platelet_source = create_platelet(index=1, collection=coll)
+    wbc_sources = create_white_blood_cells(collection=coll, seed=seed)
 
-    clearance = _placement_radius(lumen_radius)
-    rbcs = []
-    for i in range(rbc_count):
-        u = (i + 0.5) / float(max(1, rbc_count))
-        # Deterministic offset within the tube, on a loose spiral so the cells
-        # do not line up in a single row.
-        angle = u * 9.4 * math.pi + rng.uniform(-0.35, 0.35)
-        distance = clearance * math.sqrt(rng.uniform(0.05, 1.0))
-        radial = Vector((math.cos(angle) * distance,
-                         math.sin(angle) * distance, 0.0))
-        # Express the offset in the *path's own frame* at this station, not in
-        # root space. Follow Path applies the cell's location in the curve's
-        # frame, so a root-space offset is remapped by the tangent rotation and
-        # ends up pointing partly along the vessel -- on a curving path that
-        # puts the cell measurably further from the centreline than it was
-        # placed, which is how cells ended up within a hair of the wall.
-        station = min(int(round(u * (len(frames) - 1))), len(frames) - 1)
-        local = frames[station].to_3x3() @ radial
+    # A component wider than the lumen cannot be placed honestly, so a vessel
+    # too narrow for one carries none of that component. This is a real
+    # constraint, not a skipped check: a capillary is narrower than a red cell,
+    # and cells only pass by deforming. Decided *before* placing, because
+    # placing and then discarding leaves the objects in the collection, where
+    # they still count as instances.
+    def fits(source) -> bool:
+        return lumen_radius > _extent(source.data)
 
-        size = 1.0 + rng.uniform(-RBC_SIZE_JITTER, RBC_SIZE_JITTER)
-        cell = ut.instance_linked(
-            rbc_source, ut.obj_name(rbc_prefix, i + 2), coll,
-            location=local,
-            rotation=(rng.uniform(0.0, math.pi), rng.uniform(0.0, math.pi),
-                      rng.uniform(0.0, math.pi)),
-            scale=(size, size, size), parent=root)
-        cell[PROP_RBC_SOURCE] = False
-        follow = cell.constraints.new("FOLLOW_PATH")
-        follow.name = "FLOW"
-        follow.target = path
-        follow.use_curve_follow = True
-        follow.forward_axis = "TRACK_NEGATIVE_Z"
-        follow.up_axis = "UP_Y"
-        # Required, and easy to miss. With use_fixed_location off, Follow Path
-        # ignores offset_factor entirely and uses the frame-based `offset`
-        # instead, so every cell collapses onto frame 1's position on the path
-        # -- the whole blood column piles up at one end of the vessel, while
-        # the offset_factor values look perfectly correct in the UI.
-        follow.use_fixed_location = True
-        # Spread along the path so a keyframe on offset_factor moves each cell
-        # from a different start point, which is what makes flow read as flow.
-        follow.offset_factor = u
-        cell[PROP_CLASS] = "RED_BLOOD_CELL"
-        rbcs.append(cell)
+    rbcs = _place_component(
+        rbc_source, ut.obj_name(PREFIX_RBC, index),
+        rbc_count if fits(rbc_source) else 0,
+        frames, lumen_radius, rng, "RED_BLOOD_CELL", path, root, coll)
 
-    return {"root": root, "path": path, "rbc_source": rbc_source,
-            "rbcs": rbcs, **shells}
+    platelets = _place_component(
+        platelet_source, ut.obj_name(PREFIX_PLATELET, index),
+        platelet_count if fits(platelet_source) else 0,
+        frames, lumen_radius, rng, "PLATELET", path, root, coll, spread=0.8)
+
+    # White cells alternate between the classes, so wbc_count=2 gives one of
+    # each rather than two lymphocytes.
+    wbcs = []
+    labels = list(wbc_sources)
+    for i, label in enumerate(labels):
+        share = wbc_count // len(labels) + (1 if i < wbc_count % len(labels) else 0)
+        wbcs.extend(_place_component(
+            wbc_sources[label], ut.obj_name("{}_{}".format(PREFIX_WBC, label), index),
+            share if fits(wbc_sources[label]) else 0,
+            frames, lumen_radius, rng, label, path, root, coll, spread=0.5))
+
+    return {"root": root, "path": path, "rbcs": rbcs, "platelets": platelets,
+            "wbcs": wbcs, "rbc_source": rbc_source,
+            "platelet_source": platelet_source, "wbc_sources": wbc_sources,
+            **shells}
 
 
 def default_path(radius: float = VENULE_RADIUS_UM, length_um: float = 420.0) -> list:
@@ -751,27 +1133,31 @@ def build_test_vessel(collection=None, per_vessel: int = TEST_PER_VESSEL,
     """
     coll = collection or ut.resolve_collection(TEST_COLLECTION)
     if clear:
-        ut.clear_collection(coll, PREFIX)
-        ut.clear_collection(coll, PREFIX_RBC)
-        ut.clear_collection(coll, PREFIX_PATH)
+        for prefix in (PREFIX, PREFIX_RBC, PREFIX_PLATELET, PREFIX_WBC, PREFIX_PATH):
+            ut.clear_collection(coll, prefix)
 
-    # A capillary gets no red blood cells, and that is not a shortcut: its
-    # lumen is ~1.3 um across and a red blood cell is 7.5 um. Cells deform to
-    # squeeze through, which a rigid disc cannot show, so a cell in a capillary
-    # would be geometry poking through the wall. The validator asserts the
-    # absence rather than ignoring it.
+    # A capillary gets no blood at all, and that is not a shortcut: its lumen
+    # is ~1.3 um and a red blood cell is 7.5 um across. Cells deform to squeeze
+    # through, which a rigid disc cannot show, so a cell in a capillary would be
+    # geometry poking through the wall. The validator asserts the absence rather
+    # than ignoring it.
+    #
+    # The wide vessel is the one that exercises a monocyte comfortably: at
+    # 30 um radius the lumen is far wider than a white cell, where in a 15 um
+    # venule the monocyte very nearly fills it.
     cases = [
-        ("capillary", CAPILLARY_RADIUS_UM, 0),
-        ("venule", VENULE_RADIUS_UM, 15),
-        ("venule_sparse", VENULE_RADIUS_UM * 2.0, 40),
+        ("capillary", CAPILLARY_RADIUS_UM, 0, 0),
+        ("venule", VENULE_RADIUS_UM, 15, 2),
+        ("venule_sparse", VENULE_RADIUS_UM * 2.0, 40, 4),
     ]
 
     built = []
-    for i, (_label, radius, count) in enumerate(cases):
+    for i, (_label, radius, count, wbc_count) in enumerate(cases):
         offset = Vector((0.0, TEST_RADIUS_CM * i, 0.0))
         path = [Vector(p) + offset for p in default_path(radius)]
         built.append(create_blood_vessel(path, radius, rbc_count=count,
-                                         index=i + 1, collection=coll, seed=7 + i))
+                                         wbc_count=wbc_count, index=i + 1,
+                                         collection=coll, seed=7 + i))
     return {"built": built, "last": built[-1]}
 
 
@@ -809,43 +1195,68 @@ def _path_stations(path_obj) -> list:
     return [Vector(p.co[:3]) for p in spline.points]
 
 
-def _mean_radius(obj, stations, samples: int = 25) -> float:
-    """Mean distance from a shell's vertices to the vessel centreline.
+def _point_segment_distance(point, a, b) -> float:
+    """Distance from *point* to the segment *a*-*b*."""
+    ab = b - a
+    denom = ab.length_squared
+    if denom < 1e-18:
+        return (point - a).length
+    t = (point - a).dot(ab) / denom
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return (point - (a + ab * t)).length
+
+
+def _distance_to_path(point, stations, coarse: int = 4) -> float:
+    """True perpendicular distance from *point* to the centreline polyline.
+
+    Distance to the nearest *station* over-estimates, by up to half a station
+    spacing, because the nearest station is rarely at the same point along the
+    path. That bias is negligible on a 30 um vessel and enormous on a 2.5 um
+    capillary: with 4.4 um between stations, a 2.5 um capillary measured 3.6 um
+    across, and the validator then concluded it had room for a red blood cell
+    that cannot fit in it. Distance to the *segment* has no such bias.
+
+    Coarse scan for the neighbourhood, then an exact local pass. A tube is
+    locally straight, so only segments near the nearest station can win.
+    """
+    count = len(stations)
+    step = max(1, count // 32)
+    best_i, best_d = 0, 1e18
+    for i in range(0, count, step):
+        d = (point - stations[i]).length_squared
+        if d < best_d:
+            best_i, best_d = i, d
+    lo = max(0, best_i - step)
+    hi = min(count - 1, best_i + step)
+    return min(_point_segment_distance(point, stations[i], stations[i + 1])
+               for i in range(lo, hi))
+
+
+def _mean_radius(obj, stations) -> float:
+    """Mean perpendicular distance from a shell's vertices to the centreline.
 
     Distance to the *path*, not to the object origin. A vessel is far longer
     than it is wide, so distance from the origin measures mostly path length:
     an earlier version of this validator did that and confidently reported a
     1.3 um capillary as 106 um across, which made every containment check
     below it pass without ever being tested.
-
-    Args:
-        obj: The shell object.
-        stations: Centreline points, in the shell's local space.
-        samples: How many stations to test against. Sub-sampling keeps this
-            linear rather than quadratic; the centreline is smooth enough that
-            a quarter of the stations places the radius to well within the
-            tolerance a containment check needs.
     """
     if not obj.data.vertices or not stations:
         return 0.0
-    step = max(1, len(stations) // samples)
-    sampled = stations[::step]
-    total = 0.0
-    for vert in obj.data.vertices:
-        co = vert.co
-        total += min((co - s).length_squared for s in sampled) ** 0.5
-    return total / len(obj.data.vertices)
+    return sum(_distance_to_path(v.co, stations) for v in obj.data.vertices) \
+        / len(obj.data.vertices)
 
 
-def _nearest_station(point, stations, step: int = 1):
-    """Index of the centreline station closest to *point*, and that distance."""
-    sampled = stations[::step]
+def _nearest_station(point, stations, coarse: int = 4):
+    """Index of the centreline station nearest *point*, and its distance."""
+    count = len(stations)
+    step = max(1, count // 32)
     best_i, best_d = 0, 1e18
-    for i, s in enumerate(sampled):
-        d = (point - s).length_squared
+    for i in range(0, count, step):
+        d = (point - stations[i]).length_squared
         if d < best_d:
             best_i, best_d = i, d
-    return best_i * step, best_d ** 0.5
+    return best_i, best_d ** 0.5
 
 
 def _evaluated_positions(objects) -> dict:
@@ -877,44 +1288,53 @@ def validate_blood_vessel(collection=None) -> dict:
     """
     coll = collection or ut.resolve_collection(TEST_COLLECTION)
     failures = []
-    measurements = {"radius": {}, "rbc_clearance": {}, "rbc_spread": {}}
+    measurements = {"radius": {}, "clearance": {}, "spread": {},
+                    "per_class": {}}
 
     roots = [o for o in coll.objects
              if o.type == "EMPTY" and o.get(PROP_CLASS) == "BLOOD_VESSEL"]
     shells = [o for o in coll.objects if o.type == "MESH"
               and any(s in o.name for s in (SUFFIX_OUTER_WALL, SUFFIX_ENDOTHELIAL,
                                             SUFFIX_INNER_LUMEN))]
-    # Instances only. The source mesh is excluded by its own property, not by
-    # name, so a renamed source cannot quietly become an instance of itself.
-    rbcs = [o for o in coll.objects if o.type == "MESH"
-            and o.get(PROP_CLASS) == "RED_BLOOD_CELL"]
+    # Instances only. Sources are excluded by their own property, not by name,
+    # so a renamed source cannot quietly become an instance of itself.
+    components = [o for o in coll.objects if o.type == "MESH"
+                  and o.get(PROP_CLASS) in BLOOD_CLASSES and not o.get(PROP_SOURCE)]
+    sources = [o for o in coll.objects if o.get(PROP_SOURCE)]
+    extents = {s.name: s[PROP_EXTENT] for s in sources if PROP_EXTENT in s}
+    #: Per-class extent, from the sources. The single source of truth for how
+    #: much room each blood component needs.
+    class_extent = {s[PROP_CLASS]: s[PROP_EXTENT] for s in sources
+                    if PROP_CLASS in s and PROP_EXTENT in s}
 
     if not roots:
         return {"ok": False, "failures": ["no vessels built"],
                 "checks": {}, "measurements": measurements}
 
-    for obj in shells:
-        failures.extend(_check_topology(obj))
-    for obj in rbcs:
-        failures.extend(_check_topology(obj))
+    for obj in shells + components + sources:
+        if obj.type == "MESH":
+            failures.extend(_check_topology(obj))
 
-    # --- one shared red blood cell mesh, for the whole project --------------
-    sources = [o for o in coll.objects if o.get(PROP_RBC_SOURCE)]
-    for source in sources:
-        failures.extend(_check_topology(source))
-    if len(sources) > 1:
-        failures.append("{} red blood cell sources, expected 1: {}".format(
-            len(sources), sorted(o.name for o in sources)))
-    shared = {r.data.name for r in rbcs}
-    if rbcs and len(shared) != 1:
-        failures.append("red blood cells use {} mesh datablocks, expected 1: "
-                        "{}".format(len(shared), sorted(shared)))
-    for source in sources:
-        if rbcs and source.data.name not in shared:
-            failures.append("{}: instances do not share the source mesh".format(
-                source.name))
-    measurements["rbc_mesh_datablocks"] = len(shared)
-    measurements["rbc_count"] = len(rbcs)
+    # --- one shared mesh per component, not one per object ------------------
+    for label in BLOOD_CLASSES:
+        instances = [o for o in components if o.get(PROP_CLASS) == label]
+        shared = {o.data.name for o in instances}
+        if instances and len(shared) != 1:
+            failures.append("{} uses {} mesh datablocks, expected 1: {}".format(
+                label, len(shared), sorted(shared)))
+        if not instances:
+            continue
+        origin = instances[0].data.name
+        owners = {o.data.name for o in sources}
+        if origin not in owners:
+            failures.append("{}: instances use {!r}, which is not any source "
+                            "mesh".format(label, origin))
+        measurements["per_class"][label] = {
+            "count": len(instances),
+            "meshes": len(shared),
+            "extent_um": round(class_extent.get(label, 0.0), 2),
+        }
+    measurements["source_meshes"] = len({s.data.name for s in sources})
 
     # --- shell nesting -----------------------------------------------------
     suffixes = (("wall", SUFFIX_OUTER_WALL), ("endothelium", SUFFIX_ENDOTHELIAL),
@@ -923,8 +1343,8 @@ def validate_blood_vessel(collection=None) -> dict:
     for root in roots:
         path = _path_of(root, coll)
         if path is None:
-            failures.append("{}: no flow path; the red blood cells have nothing "
-                            "to follow".format(root.name))
+            failures.append("{}: no flow path; the blood has nothing to "
+                            "follow".format(root.name))
             continue
         stations = _path_stations(path)
 
@@ -945,74 +1365,87 @@ def validate_blood_vessel(collection=None) -> dict:
             failures.append("{}: shells are not nested wall>endo>lumen ({})".format(
                 root.name, {k: round(v, 2) for k, v in found.items()}))
 
-    # --- red blood cells are inside the lumen ------------------------------
+    # --- every component is inside the lumen, and spread along it ------------
     for root in roots:
         lumen_r = lumen_radii.get(root.name)
         if lumen_r is None:
             continue
-        # Follow Path puts the cell's origin on the centreline and applies the
-        # cell's own location as an offset from it, so the magnitude of that
-        # offset *is* the distance from the centreline. No evaluation needed.
-        cells = [c for c in coll.objects
-                 if c.type == "MESH" and c.parent == root
-                 and c.get(PROP_CLASS) == "RED_BLOOD_CELL"]
-        if not cells:
-            # A lumen too narrow for a cell must be empty, not full of cells
-            # clipping through it.
-            if lumen_r > _rbc_extent():
-                failures.append("{}: no red blood cells in a lumen {} um wide; "
-                                "it has room for them".format(
-                                    root.name, round(lumen_r, 1)))
-            continue
-        if lumen_r <= _rbc_extent():
-            failures.append("{}: a red blood cell in a {} um lumen cannot fit; "
-                            "a cell is {} um across".format(
-                                root.name, round(lumen_r, 1), RBC_DIAMETER_UM))
-            continue
-
-        # Check where the cells actually end up, constraints evaluated.
         path = _path_of(root, coll)
         stations_world = [root.matrix_world @ s for s in _path_stations(path)]
-        positions = _evaluated_positions(cells)
-        extent = _rbc_extent()
-        indices, worst = [], 0.0
-        for cell in cells:
-            point = positions[cell.name]
-            index, distance = _nearest_station(point, stations_world,
-                                               step=max(1, len(stations_world) // 40))
-            indices.append(index)
-            worst = max(worst, distance + extent)
+        positions = _evaluated_positions(
+            [c for c in coll.objects if c.type == "MESH" and c.parent == root
+             and c.get(PROP_CLASS) in BLOOD_CLASSES])
 
-        allowed = _placement_radius(lumen_r)
-        measurements["rbc_clearance"][root.name] = round(lumen_r - worst, 3)
-        if worst > lumen_r + 1e-6:
-            failures.append("{}: a red blood cell reaches {:.2f} um from the "
-                            "centreline; the lumen is only {} um wide".format(
-                                root.name, worst, round(lumen_r, 2)))
-        # Compare like with like: *worst* includes the cell's own extent, while
-        # *allowed* is a centreline distance. Comparing the two against each
-        # other flags every cell as a breach, because the cell is always wider
-        # than its placement radius.
-        if worst - _rbc_extent() > allowed + RBC_FRAME_ROLL_TOLERANCE_UM:
-            failures.append("{}: a red blood cell sits {:.2f} um off the centreline, "
-                            "past the {:.2f} um that leaves clearance to the wall".format(
-                                root.name, worst - _rbc_extent(), allowed))
+        for label in BLOOD_CLASSES:
+            cells = [c for c in coll.objects
+                     if c.type == "MESH" and c.parent == root
+                     and c.get(PROP_CLASS) == label
+                     and not c.get(PROP_SOURCE)]
+            # A cell wider than the lumen cannot be placed honestly, so a
+            # vessel too narrow for one carries none. That is a real
+            # constraint, not a skipped check: a capillary is narrower than a
+            # red cell, and cells only pass by deforming.
+            extent = max((extents.get(o.name, 0.0) for o in cells),
+                         default=class_extent.get(label, 0.0))
+            if not cells:
+                if lumen_r > class_extent.get(label, 0.0):
+                    failures.append("{}: no {} in a lumen {} um wide; it has room "
+                                    "for them".format(root.name, label,
+                                                      round(lumen_r, 1)))
+                continue
+            if lumen_r <= extent:
+                failures.append("{}: a {} does not fit a {} um lumen "
+                                "(it needs {} um of room)".format(
+                                    root.name, label, round(lumen_r, 1),
+                                    round(extent, 1)))
+                continue
 
-        # The cells must actually be spread along the vessel. This is the check
-        # that catches a Follow Path constraint which resolves to a single
-        # point: the geometry is all correct and every cell is inside the
-        # lumen, they are just all in the same place.
-        spread = (max(indices) - min(indices)) / float(max(1, len(stations_world) - 1))
-        measurements["rbc_spread"][root.name] = round(spread, 3)
-        if spread < 0.4:
-            failures.append("{}: red blood cells occupy only {:.0%} of the vessel; "
-                            "they are not spread along it".format(
-                                root.name, spread))
+            indices, worst = [], 0.0
+            for cell in cells:
+                point = positions[cell.name]
+                indices.append(_nearest_station(point, stations_world)[0])
+                worst = max(worst, _distance_to_path(point, stations_world) + extent)
+
+            allowed = _placement_radius(lumen_r, extent)
+            measurements["clearance"].setdefault(root.name, {})[label] = round(
+                lumen_r - worst, 3)
+
+            if worst > lumen_r + 1e-6:
+                failures.append("{}: a {} reaches {:.2f} um from the centreline; "
+                                "the lumen is only {} um wide".format(
+                                    root.name, label, worst, round(lumen_r, 2)))
+            # Compare like with like: *worst* includes the component's own
+            # extent, while *allowed* is a centreline distance. Comparing the
+            # two against each other flags everything as a breach, because
+            # every component is wider than its own placement radius.
+            if worst - extent > allowed + RBC_FRAME_ROLL_TOLERANCE_UM:
+                failures.append("{}: a {} sits {:.2f} um off the centreline, past "
+                                "the {:.2f} um that leaves clearance to the "
+                                "wall".format(root.name, label, worst - extent,
+                                              allowed))
+
+            # Red cells must actually be spread along the vessel. This is the
+            # check that catches a Follow Path constraint resolving to a single
+            # point: the geometry is all correct and every cell is inside the
+            # lumen, they are just all in the same place.
+            #
+            # Measured for red cells only. They are the component that fills
+            # the vessel; white cells and platelets are placed in a
+            # deliberately short stretch of it and there are too few of them
+            # for a spread figure to mean anything.
+            if label == "RED_BLOOD_CELL" and len(cells) >= 3:
+                spread = ((max(indices) - min(indices))
+                          / float(max(1, len(stations_world) - 1)))
+                measurements["spread"].setdefault(root.name, {})[label] = round(spread, 3)
+                if spread < 0.4:
+                    failures.append("{}: {} occupy only {:.0%} of the vessel; they "
+                                    "are not spread along it".format(
+                                        root.name, label, spread))
 
     # --- instancing, not duplication ---------------------------------------
-    per_vessel = sorted({r.parent.name for r in rbcs if r.parent is not None})
-    measurements["rbcs_per_vessel"] = {
-        name: sum(1 for r in rbcs if r.parent is not None and r.parent.name == name)
+    per_vessel = sorted({r.parent.name for r in components if r.parent is not None})
+    measurements["components_per_vessel"] = {
+        name: sum(1 for r in components if r.parent is not None and r.parent.name == name)
         for name in per_vessel}
 
     # --- no animation ------------------------------------------------------
@@ -1034,8 +1467,10 @@ def validate_blood_vessel(collection=None) -> dict:
         "checks": {
             "vessels": len(roots),
             "shells": len(shells),
-            "rbcs": len(rbcs),
-            "materials": sorted({m.name for o in shells + rbcs for m in o.data.materials}),
+            "components": len(components),
+            "sources": len(sources),
+            "materials": sorted({m.name for o in shells + components
+                                 for m in o.data.materials}),
         },
         "measurements": measurements,
     }
@@ -1050,7 +1485,7 @@ def main() -> None:
     print("[vessel] built {} vessels in {}".format(
         report["checks"].get("vessels"), TEST_COLLECTION))
     print("[vessel] checks: {}".format(report["checks"]))
-    for key in ("rbc_mesh_datablocks", "rbc_count", "rbc_clearance"):
+    for key in ("per_class", "source_meshes", "clearance", "spread"):
         if key in report["measurements"]:
             print("[vessel] {}: {}".format(key, report["measurements"][key]))
     if report["ok"]:
