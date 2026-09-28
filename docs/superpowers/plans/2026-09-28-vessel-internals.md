@@ -121,7 +121,7 @@ Expected: `NameError: name 'muscle_thickness' is not defined`
 Insert after `LUMEN_THICKNESS_UM` (line ~116):
 
 ```python
-#: Radii at or below this get no smooth muscle shell at all. A capillary is a
+#: Radii below this get no smooth muscle shell at all. A capillary is a
 #: single endothelial layer with scattered pericytes; it has no media layer.
 #: The shell is *absent* rather than zero-thickness, because a zero-thickness
 #: tube is degenerate geometry.
