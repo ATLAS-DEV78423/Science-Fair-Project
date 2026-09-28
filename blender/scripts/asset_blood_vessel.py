@@ -98,6 +98,8 @@ PREFIX_WBC = "WBC"
 PREFIX_PATH = "VESSEL_PATH"
 
 SUFFIX_OUTER_WALL = "OUTER_WALL"
+SUFFIX_SMOOTH_MUSCLE = "SMOOTH_MUSCLE"
+SUFFIX_BASEMENT = "BASEMENT_MEMBRANE"
 SUFFIX_ENDOTHELIAL = "ENDOTHELIAL_LAYER"
 SUFFIX_INNER_LUMEN = "INNER_LUMEN"
 
@@ -114,6 +116,24 @@ WALL_THICKNESS_UM = 0.8
 #: Thickness of the lumen surface inside the endothelium. Thin: it only needs
 #: to be a distinct visible surface, not a modelled layer.
 LUMEN_THICKNESS_UM = 0.4
+
+#: Radii at or below this get no smooth muscle shell at all. A capillary is a
+#: single endothelial layer with scattered pericytes; it has no media layer.
+#: The shell is *absent* rather than zero-thickness, because a zero-thickness
+#: tube is degenerate geometry.
+MUSCLE_MIN_RADIUS_UM = 5.0
+#: Media growth per micrometre of radius, above the threshold.
+MUSCLE_WALL_FRACTION = 0.18
+#: Floor on media thickness. Not cosmetic: unfloored, the term is 0.0018 um at
+#: r=5.01, which is below what a 24-segment ring resolves, so the validator's
+#: geometric nesting check would pass by luck. Same rule as LUMEN_THICKNESS_UM
+#: -- a distinct visible surface, not a modelled layer.
+MUSCLE_MIN_THICKNESS_UM = 0.3
+#: The basement membrane is a thin sheet under the endothelium.
+BASEMENT_THICKNESS_UM = 0.15
+#: Floor on the outermost connective layer, so it never collapses onto the
+#: media and the nesting chain keeps five distinct surfaces.
+ADVENTITIA_MIN_UM = 0.3
 
 #: Radial irregularity, as a fraction of the radius. Visible but not lumpy --
 #: a vessel is a tube that wanders, not a potato.
@@ -332,8 +352,94 @@ def ensure_materials() -> dict:
     in a vessel looks exactly like the same cell in tissue.
     """
     return {key: _material(spec) for key, spec in (
-        ("wall", MAT_WALL), ("endothelium", MAT_ENDOTHELIAL),
+        # ``muscle`` and ``basement`` reuse the wall and endothelial materials
+        # as placeholders, so the shell loop's ``materials[key]`` lookup cannot
+        # KeyError before those two layers have their own. Task 2 replaces them.
+        ("outer", MAT_WALL), ("muscle", MAT_WALL),
+        ("endothelium", MAT_ENDOTHELIAL), ("basement", MAT_ENDOTHELIAL),
         ("lumen", MAT_LUMEN), ("rbc", MAT_RBC), ("platelet", MAT_PLATELET))}
+
+
+# ---------------------------------------------------------------------------
+# Wall layer arithmetic
+# ---------------------------------------------------------------------------
+
+#: The shells of the vessel wall, outermost first. The builder sweeps them in
+#: this order and the validator nests them in this order, so a layer's position
+#: in the wall is stated once rather than twice.
+#:
+#: The adventitia is deliberately absent from this tuple. It is the layer that
+#: absorbs whatever radial room the new tissue needs, so its thickness is a
+#: *consequence* of the other three rather than a decision, and sweeping it
+#: would double-count a thickness already accounted for. What it measures is
+#: still worth knowing -- that is what :func:`wall_radii` returns it for.
+WALL_SHELL_ORDER = ("outer", "muscle", "basement", "endothelium", "lumen")
+#: Object-name suffix per shell key. The validator matches shells by suffix, so
+#: these strings are the contract between the builder and the validator.
+WALL_SHELL_SUFFIXES = {"outer": SUFFIX_OUTER_WALL, "muscle": SUFFIX_SMOOTH_MUSCLE,
+                       "basement": SUFFIX_BASEMENT,
+                       "endothelium": SUFFIX_ENDOTHELIAL,
+                       "lumen": SUFFIX_INNER_LUMEN}
+
+
+def muscle_thickness(radius: float) -> float:
+    """Media thickness for a vessel of *radius*. Zero below the capillary scale."""
+    if radius < MUSCLE_MIN_RADIUS_UM:
+        return 0.0
+    return MUSCLE_MIN_THICKNESS_UM + (radius - MUSCLE_MIN_RADIUS_UM) * MUSCLE_WALL_FRACTION
+
+
+def wall_radii(radius: float, lumen_radius: float,
+               endothelium_radius: float) -> dict:
+    """Radii of the wall layers outside the endothelium.
+
+    The lumen and endothelium radii are inputs, not outputs, and are returned
+    unchanged: every containment check in this project is computed against the
+    lumen, so the new tissue is added *outward* rather than eating into it.
+
+    The three new layers absorb whatever is left of *radius*, which is why the
+    outer wall lands exactly on *radius* for a capillary and slightly outside
+    it for a larger vessel.
+    """
+    basement = endothelium_radius + BASEMENT_THICKNESS_UM
+    muscle = muscle_thickness(radius)
+    adventitia = max(ADVENTITIA_MIN_UM, radius - basement - muscle)
+    return {"basement": basement,
+            "muscle": basement + muscle if muscle > 0.0 else None,
+            "adventitia": adventitia,
+            "outer": basement + muscle + adventitia}
+
+
+def _selftest_wall_geometry() -> dict:
+    """Pure-arithmetic check on the wall layer radii. No bpy needed."""
+    out = {}
+    # Below the threshold there is no media at all: a capillary is a single
+    # endothelial layer, so the muscle shell must be absent, not zero-thick.
+    assert muscle_thickness(2.5) == 0.0
+    # Above it, floored, so the shell is always a resolvable surface. An
+    # unfloored proportional term is 0.0018 um at r=5.01, which a 24-segment
+    # ring cannot represent.
+    assert abs(muscle_thickness(5.01) - 0.3018) < 1e-9
+    assert abs(muscle_thickness(15.0) - 2.1) < 1e-9
+
+    for radius in (CAPILLARY_RADIUS_UM, 5.0, 5.01, VENULE_RADIUS_UM, 30.0):
+        endo = radius - WALL_THICKNESS_UM
+        lumen = endo - LUMEN_THICKNESS_UM
+        radii = wall_radii(radius, lumen, endo)
+        # Lumen and endothelium are FROZEN. This is the load-bearing
+        # guarantee: every containment check in the project is computed
+        # against the lumen radius, and it must not move.
+        assert radii["basement"] == endo + BASEMENT_THICKNESS_UM
+        # The outer wall never shrinks below the requested radius.
+        assert radii["outer"] >= radius - 1e-9
+        # Nesting is monotonic over whatever shells exist.
+        chain = [radii["outer"]]
+        if radii["muscle"] is not None:
+            chain.append(radii["muscle"])
+        chain += [radii["basement"], endo, lumen]
+        assert all(a > b for a, b in zip(chain, chain[1:])), chain
+        out[radius] = chain
+    return out
 
 
 def _extent(mesh, margin: float = None) -> float:
@@ -976,12 +1082,12 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
                         collection=None, parent=None, seed: int = 0) -> dict:
     """Create a blood vessel along *path_points*, with its blood contents.
 
-    Builds three nested shells and a suspension inside them: red blood cells,
-    platelets, and white blood cells. All three are instanced from one shared
-    source mesh each, so a full vessel costs a handful of datablocks rather
-    than one per object.
+    Builds five nested shells and a suspension inside them: red blood cells,
+    platelets, and white blood cells. All three components are instanced from
+    one shared source mesh each, so a full vessel costs a handful of datablocks
+    rather than one per object.
 
-    All three shells are translucent, including the lumen, because the lumen
+    All five shells are translucent, including the lumen, because the lumen
     surface is the *near* one from any viewpoint: an opaque lumen hides the
     contents just as thoroughly as an opaque wall.
 
@@ -998,10 +1104,12 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
     Args:
         path_points: Sequence of at least 2 world-space points defining the
             centreline. A gentle S-curve is the default in the test scene.
-        radius: Lumen-scale outer radius in micrometres. Use
+        radius: Lumen-scale *requested* outer radius in micrometres. Use
             :data:`VENULE_RADIUS_UM` for a readable vessel;
             :data:`CAPILLARY_RADIUS_UM` is faithful but barely wider than one
-            red blood cell, and carries no cells at all.
+            red blood cell, and carries no cells at all. The wall layers grow
+            *outward* from it, so the built outer shell can sit slightly outside
+            this value; the lumen and endothelium never move.
         rbc_count: Number of red blood cells. All share one mesh.
         wbc_count: Number of white blood cells, split across the classes in
             :data:`WBC_CLASSES`.
@@ -1013,9 +1121,9 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
         seed: Controls all variation. Same seed, same vessel, every time.
 
     Returns:
-        A dict with the shell objects under ``"wall"``, ``"endothelium"`` and
-        ``"lumen"``; the flow path under ``"path"``; the vessel root under
-        ``"root"``; each component's instances under ``"rbcs"``,
+        A dict with the shell objects under every key in
+        :data:`WALL_SHELL_ORDER`; the flow path under ``"path"``; the vessel
+        root under ``"root"``; each component's instances under ``"rbcs"``,
         ``"platelets"`` and ``"wbcs"``; and each component's shared source
         under ``"rbc_source"``, ``"platelet_source"`` and ``"wbc_sources"``.
     """
@@ -1033,9 +1141,11 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
     factor = _radius_profile(rng)
 
     lumen_radius = max(radius - WALL_THICKNESS_UM - LUMEN_THICKNESS_UM, radius * 0.2)
-    radii = {"wall": radius,
-             "endothelium": radius - WALL_THICKNESS_UM,
-             "lumen": lumen_radius}
+    # The new wall tissue is added outward from the frozen endothelium, so the
+    # requested *radius* is no longer a shell radius: the outer surface lands
+    # outside it whenever the media is thicker than the adventitia's floor.
+    wall = wall_radii(radius, lumen_radius, radius - WALL_THICKNESS_UM)
+    radii = dict(wall, endothelium=radius - WALL_THICKNESS_UM, lumen=lumen_radius)
 
     root = ut.new_empty(ut.obj_name(PREFIX, index), coll, size=radius * 0.5,
                         parent=parent)
@@ -1043,10 +1153,14 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
     root[PROP_NOTE] = ILLUSTRATIVE_NOTE
 
     shells = {}
-    for key, suffix in (("wall", SUFFIX_OUTER_WALL),
-                        ("endothelium", SUFFIX_ENDOTHELIAL),
-                        ("lumen", SUFFIX_INNER_LUMEN)):
-        obj_name = ut.obj_name("{}_{}".format(PREFIX, suffix), index)
+    for key in WALL_SHELL_ORDER:
+        # A None radius means the layer is anatomically absent, not zero-thick,
+        # so there is no shell to build: a capillary is endothelium and nothing
+        # else. See :func:`muscle_thickness`.
+        if radii[key] is None:
+            continue
+        obj_name = ut.obj_name(
+            "{}_{}".format(PREFIX, WALL_SHELL_SUFFIXES[key]), index)
         mesh = _tube_mesh("MESH_{}".format(obj_name), frames, radii[key], factor)
         shell = ut.get_or_create_object(obj_name, coll, lambda n, m=mesh: m)
         ut.set_parent(shell, root)
@@ -1294,8 +1408,7 @@ def validate_blood_vessel(collection=None) -> dict:
     roots = [o for o in coll.objects
              if o.type == "EMPTY" and o.get(PROP_CLASS) == "BLOOD_VESSEL"]
     shells = [o for o in coll.objects if o.type == "MESH"
-              and any(s in o.name for s in (SUFFIX_OUTER_WALL, SUFFIX_ENDOTHELIAL,
-                                            SUFFIX_INNER_LUMEN))]
+              and any(s in o.name for s in WALL_SHELL_SUFFIXES.values())]
     # Instances only. Sources are excluded by their own property, not by name,
     # so a renamed source cannot quietly become an instance of itself.
     components = [o for o in coll.objects if o.type == "MESH"
@@ -1337,8 +1450,6 @@ def validate_blood_vessel(collection=None) -> dict:
     measurements["source_meshes"] = len({s.data.name for s in sources})
 
     # --- shell nesting -----------------------------------------------------
-    suffixes = (("wall", SUFFIX_OUTER_WALL), ("endothelium", SUFFIX_ENDOTHELIAL),
-                ("lumen", SUFFIX_INNER_LUMEN))
     lumen_radii = {}
     for root in roots:
         path = _path_of(root, coll)
@@ -1352,18 +1463,32 @@ def validate_blood_vessel(collection=None) -> dict:
         for obj in coll.objects:
             if obj.type != "MESH" or obj.parent != root:
                 continue
-            for key, suffix in suffixes:
+            for key, suffix in WALL_SHELL_SUFFIXES.items():
                 if suffix in obj.name:
                     found[key] = _mean_radius(obj, stations)
-        if set(found) != {"wall", "endothelium", "lumen"}:
+        # The media is optional by design, so only the two ends of the chain and
+        # the endothelium are required to be present. Everything that *is* built
+        # still has to be strictly inside everything outside it.
+        if not {"outer", "endothelium", "lumen"} <= set(found):
             failures.append("{}: missing a shell layer (found {})".format(
                 root.name, sorted(found)))
             continue
         lumen_radii[root.name] = found["lumen"]
         measurements["radius"][root.name] = {k: round(v, 3) for k, v in found.items()}
-        if not found["wall"] > found["endothelium"] > found["lumen"] > 0.0:
-            failures.append("{}: shells are not nested wall>endo>lumen ({})".format(
-                root.name, {k: round(v, 2) for k, v in found.items()}))
+        chain = [found[key] for key in WALL_SHELL_ORDER if key in found]
+        if not all(a > b for a, b in zip(chain, chain[1:])):
+            failures.append("{}: shells are not nested {} ({})".format(
+                root.name, ">".join(WALL_SHELL_ORDER),
+                {k: round(v, 2) for k, v in found.items()}))
+        # A capillary has no media and a venule has no excuse for one, so the
+        # shell's presence is checked against the radius actually built. This is
+        # the wiring check: a builder that silently dropped the muscle layer
+        # everywhere would still nest correctly, just too shallowly.
+        if ("muscle" in found) != (found["outer"] >= MUSCLE_MIN_RADIUS_UM):
+            failures.append(
+                "{}: {} a smooth muscle shell for a {:.2f} um outer radius".format(
+                    root.name, "has" if "muscle" in found else "is missing",
+                    found["outer"]))
 
     # --- every component is inside the lumen, and spread along it ------------
     for root in roots:
