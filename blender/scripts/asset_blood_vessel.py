@@ -117,7 +117,7 @@ WALL_THICKNESS_UM = 0.8
 #: to be a distinct visible surface, not a modelled layer.
 LUMEN_THICKNESS_UM = 0.4
 
-#: Radii at or below this get no smooth muscle shell at all. A capillary is a
+#: Radii below this get no smooth muscle shell at all. A capillary is a
 #: single endothelial layer with scattered pericytes; it has no media layer.
 #: The shell is *absent* rather than zero-thickness, because a zero-thickness
 #: tube is degenerate geometry.
@@ -1602,8 +1602,20 @@ def validate_blood_vessel(collection=None) -> dict:
 
 
 def main() -> None:
-    """Generate the test collection, validate it, and report."""
+    """Check the frozen wall radii, generate the test collection, validate, report."""
     ut.setup_units()
+    # Runs before the build, and asserts the one property the validator's
+    # ordering check cannot see: that the wall arithmetic is anchored outward on
+    # the endothelium and lumen it was handed, and that the outer surface still
+    # reaches the requested radius. A wall that is correctly *ordered* but the
+    # wrong *size* passes every shell check in :func:`validate_blood_vessel`.
+    try:
+        _selftest_wall_geometry()
+    except AssertionError as exc:
+        print("[vessel] FAIL: wall geometry: {}".format(exc))
+        raise SystemExit("[vessel] WALL GEOMETRY CHECK FAILED")
+    print("[vessel] wall geometry: endothelium and lumen anchored, "
+          "wall grows outward")
     build_test_vessel()
     report = validate_blood_vessel()
 
