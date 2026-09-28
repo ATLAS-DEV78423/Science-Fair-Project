@@ -151,6 +151,12 @@ ASPECT_RANGE = (0.94, 1.06)
 NUCLEUS_ASPECT_RANGE = (0.90, 1.10)
 NUCLEUS_OFFSET = 0.14
 
+#: Shared procedural texture for membrane deformation. One texture for every
+#: immune cell; per-cell variation comes from OBJECT-space coordinates against
+#: each cell's own root. Carries no animation -- the idle layer owns that.
+TEX_DISPLACE_NAME = "TEX_ImmuneCellDisplace"
+MEMBRANE_DEFORM_STRENGTH = 0.32
+
 PROP_CLASS = "immune_class"
 PROP_SELECTED = "selected"
 
@@ -467,6 +473,34 @@ def _surface_directions(count, rng):
     return out
 
 
+def _add_membrane_deformation(obj, root) -> None:
+    """Attach the animatable Displace modifier to a membrane.
+
+    All immune cells share one Clouds texture but use OBJECT-space coordinates
+    relative to their own root, so each deforms differently from the same
+    texture and moving a cell carries its deformation field along.
+
+    Ruffles are separate objects parented to the membrane, not part of its
+    mesh, so they hold still while the surface moves under them. At this
+    strength the gap is well inside the ruffle radius and does not read.
+    """
+    texture = bpy.data.textures.get(TEX_DISPLACE_NAME)
+    if texture is None:
+        texture = bpy.data.textures.new(TEX_DISPLACE_NAME, type="CLOUDS")
+    texture.noise_scale = 0.35
+    texture.noise_depth = 2
+
+    modifier = obj.modifiers.get("MOD_MembraneDeform")
+    if modifier is None:
+        modifier = obj.modifiers.new("MOD_MembraneDeform", "DISPLACE")
+    modifier.texture = texture
+    modifier.texture_coords = "OBJECT"
+    modifier.texture_coords_object = root
+    modifier.direction = "NORMAL"
+    modifier.mid_level = 0.5
+    modifier.strength = MEMBRANE_DEFORM_STRENGTH
+
+
 # ---------------------------------------------------------------------------
 # Shared builder
 # ---------------------------------------------------------------------------
@@ -505,6 +539,7 @@ def _create_immune_cell(kind: str, location=(0.0, 0.0, 0.0), scale: float = 1.0,
         lambda n: membrane_mesh)
     ut.set_parent(membrane, root)
     ut.assign_material(membrane, materials["membrane"])
+    _add_membrane_deformation(membrane, root)
 
     # Cytoplasm shares the envelope's aspect so the layers stay concentric, but
     # gets its own noise phase: an interior does not mirror its shell.
@@ -804,6 +839,17 @@ def validate_immune_cells(collection=None, per_class: int = TEST_PER_CLASS) -> d
         for required in (SUFFIX_MEMBRANE, SUFFIX_CYTOPLASM, SUFFIX_NUCLEUS):
             if required not in parts:
                 failures.append("{}: missing part {}".format(root.name, required))
+
+        membrane = parts.get(SUFFIX_MEMBRANE)
+        if membrane is not None:
+            mod = membrane.modifiers.get("MOD_MembraneDeform")
+            if mod is None:
+                failures.append("{}: membrane deformation modifier missing".format(
+                    membrane.name))
+            elif mod.texture_coords_object != root:
+                failures.append("{}: deformation not bound to its own root".format(
+                    membrane.name))
+
         if spec["processes"] and process is None:
             failures.append("{}: {} requires a dendritic process mesh".format(
                 root.name, kind))
