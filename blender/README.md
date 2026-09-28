@@ -42,11 +42,12 @@ Scaffold plus the first asset.
 ambient, render settings.
 
 **Assets:** `asset_healthy_cell.py`, `asset_tumor_cell.py`,
-`asset_immune_cells.py` and `asset_virus_hsv1.py` are implemented and
-validated. The two remaining `asset_*.py` and all six `animation_*.py` remain
-**API contracts only** — their entry points raise `NotImplementedError` with a
-note on what belongs there. That is intentional: the signatures are fixed now
-so nothing drifts, but no speculative geometry has been written.
+`asset_immune_cells.py`, `asset_virus_hsv1.py` and `asset_blood_vessel.py` are
+implemented and validated. The last remaining `asset_*.py` (`asset_ecm.py`) and
+all six `animation_*.py` remain **API contracts only** — their entry points
+raise `NotImplementedError` with a note on what belongs there. That is
+intentional: the signatures are fixed now so nothing drifts, but no speculative
+geometry has been written.
 
 Validate any asset and regenerate its test collection:
 
@@ -55,24 +56,25 @@ blender --background --python blender/scripts/asset_healthy_cell.py
 blender --background --python blender/scripts/asset_tumor_cell.py
 blender --background --python blender/scripts/asset_immune_cells.py
 blender --background --python blender/scripts/asset_virus_hsv1.py
+blender --background --python blender/scripts/asset_blood_vessel.py
 ```
 
 The test collections (`TEST_HealthyCells`, `TEST_TumorCells`,
-`TEST_ImmuneCells`, `TEST_HSV1_Virions`) are nested under `10_DEBUG`, so
-excluding them from any future glTF export is structural rather than a
-convention someone has to remember at export time.
+`TEST_ImmuneCells`, `TEST_HSV1_Virions`, `TEST_BloodVessel`) are nested under
+`10_DEBUG`, so excluding them from any future glTF export is structural rather
+than a convention someone has to remember at export time.
 
 ### Visual legibility is not automatic
 
-A recurring finding across all three cell assets: **geometry, materials and
+A recurring finding across all five assets: **geometry, materials and
 naming can all validate while the model is unreadable.** Two translucent
 layers plus AgX rolloff will wash an interior out to a featureless pale ball
 until the cytoplasm alpha comes down and the nucleus colour deepens. Every
-cell asset was rendered and inspected at the camera distances it will
-actually be viewed at before being called done. Do not trust a green
-validator on its own for anything visual.
+asset was rendered and inspected at the camera distances it will actually be
+viewed at before being called done. Do not trust a green validator on its own
+for anything visual.
 
-Two related lessons:
+Three related lessons:
 
 - **0.16 µm detail does not register.** Membrane ruffles sized to real
   biology were invisible at every camera distance. They are now 0.30 µm.
@@ -81,6 +83,20 @@ Two related lessons:
   amoeboid macrophage's lobes push the bounding box to ~20 µm against a
   13 µm body. Where a declared size is claimed, the shape factor is
   normalised by its own mean so the claim is true by construction.
+- **A closed opaque tube hides everything inside it.** The vessel validated
+  perfectly as an opaque dark pipe with no visible lumen and no blood cells in
+  it. All three shells had to go translucent — including the lumen, which is
+  the *near* surface from any viewpoint, so an opaque lumen hides the cells
+  just as thoroughly as an opaque wall. Only the cells stay opaque, which is
+  what makes them read as objects rather than as a tint.
+
+And one that is a validator lesson rather than a shading one: **check where
+objects end up, not where you put them.** Reading `object.location` to confirm
+a Follow Path constraint is doing its job reports what the builder asked for,
+not what the renderer draws. The vessel's entire blood column was stacked at
+one end of the vessel with every location value correct, because
+`use_fixed_location` was off and the constraint was reading its frame-based
+`offset` instead. `validate_blood_vessel` now evaluates the depsgraph.
 
 ---
 
@@ -197,7 +213,7 @@ blender/scripts/
     asset_immune_cells.py         # IMMUNE_TCELL_*, IMMUNE_NK_*,
                                   # IMMUNE_DENDRITIC_*, IMMUNE_MACROPHAGE_*
     asset_virus_hsv1.py           # VIRUS_HSV1_*
-    asset_blood_vessel.py         # VESSEL_*            (contract only)
+    asset_blood_vessel.py         # VESSEL_*, RBC_DISC_*  (real, working)
     asset_ecm.py                  # ECM_FIBER_*         (contract only)
 
     animation_virus_entry.py      # frames    1-120
@@ -392,12 +408,16 @@ without evaluating the camera's fcurves.
   conditional on performance anyway. `cycles.volume_bounces = 0` for now. Add
   it via a volume scatter on `WORLD_Master` once there is geometry to justify
   it.
-- **The remaining two asset scripts.** `asset_blood_vessel` and `asset_ecm`
-  are contracts only. The four completed assets are the reference for how the
-  rest should look: constants at module level, procedural geometry, a
-  `create_*` entry point taking a seed, a validator, and a render check before
-  it is called done.
+- **The remaining asset script.** `asset_ecm` is a contract only. The five
+  completed assets are the reference for how the rest should look: constants
+  at module level, procedural geometry, a `create_*` entry point taking a
+  seed, a validator, and a render check before it is called done.
 - **All animation.** The six `animation_*.py` scripts are contracts only.
+  `asset_blood_vessel` is laid out for it: the centreline is a real curve
+  object and every red blood cell carries a Follow Path constraint, so blood
+  flow is a keyframe on `offset_factor` per cell and nothing else. Note that
+  `use_fixed_location` must stay on, or the constraint silently ignores
+  `offset_factor` and every cell collapses onto frame 1's position.
 - **glTF export.** Not yet wired. Read the export-scale note above first.
 
 ## Known gaps
