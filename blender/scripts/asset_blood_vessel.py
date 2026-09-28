@@ -144,6 +144,21 @@ NOISE_SCALE_ALONG = 0.045
 NOISE_WEIGHT_FINE = 0.40
 NOISE_SCALE_FINE = 0.13
 
+#: Slack allowed on the measured-radius check, as a fraction of the expected
+#: radius, derived from the noise that puts the shells off nominal in the first
+#: place. A single vertex can sit ``IRREGULARITY_RADIUS * (1 +
+#: NOISE_WEIGHT_FINE)`` = 7.7% away from the nominal radius, but
+#: :func:`_mean_radius` averages that field over every vertex of the shell --
+#: 2304 of them, on a noise whose wavelength is long next to the ring spacing --
+#: and the sign changes cancel. Measured on the three test vessels, the mean
+#: lands 0.19% to 0.39% out. A quarter of the coarse amplitude sits between the
+#: two numbers that matter: 3.5x the worst residual actually observed, so it
+#: cannot false-fail, and 0.4 um on the widest test vessel, so a one-micrometre
+#: drift is caught with room to spare. A tolerance near zero would fire on the
+#: noise; a tolerance near the per-vertex bound would pass a lumen that is a
+#: quarter too narrow.
+MEASURED_RADIUS_TOLERANCE = IRREGULARITY_RADIUS * 0.25
+
 #: Tube resolution. The tube is the biggest mesh in the scene, so this is
 #: deliberately the only place a coarse ring pays off.
 STATIONS = 96
@@ -257,6 +272,12 @@ PROP_SOURCE = "blood_source"
 #: builder from the source's own geometry and read back by the validator, so
 #: the two cannot disagree about what fits.
 PROP_EXTENT = "blood_extent_um"
+#: The radius this vessel was asked for, in micrometres, written by
+#: :func:`create_blood_vessel` and read back by the validator. Every containment
+#: check in the project is computed against a *measured* radius, so without this
+#: the build has nothing to be measured against: the validator can confirm the
+#: shells are the right way round and no further.
+PROP_REQUESTED_RADIUS = "requested_radius_um"
 
 ILLUSTRATIVE_NOTE = ("Conceptual representation of tumour-associated "
                      "vasculature; not an anatomically accurate vessel.")
@@ -334,6 +355,88 @@ MAT_PLATELET = dict(
     emission=(0.88, 0.85, 0.95, 1.0),
 )
 
+#: The media. Warmer and less saturated than the outer wall it sits inside, so
+#: the layer boundary reads as a change of tissue rather than as a second wall
+#: of the same colour, and the most transparent of the new shells: the shell
+#: loop now puts three of these between the camera and the blood, and the
+#: alpha budget only works if each one buys its legibility with less opacity
+#: than the surfaces already there.
+MAT_SMOOTH_MUSCLE = dict(
+    name="MAT_Vessel_SmoothMuscle",
+    base_color=(0.72, 0.42, 0.40, 1.0),
+    roughness=0.5,
+    subsurface=0.15,
+    alpha=0.12,
+    emission=(0.72, 0.42, 0.40, 1.0),
+)
+
+#: The basement membrane, the thinnest surface in the wall and the palest. At
+#: :data:`BASEMENT_THICKNESS_UM` there is barely a ring's worth of it to see, so
+#: it is tinted towards the endothelial lining immediately outside it and given
+#: the lowest alpha of anything built here: a 0.15 um sheet drawn at 0.20 alpha
+#: is still a stack of two walls in every frame, and this is the layer whose job
+#: is to be *implied* rather than looked at.
+MAT_BASEMENT = dict(
+    name="MAT_Vessel_BasementMembrane",
+    base_color=(0.85, 0.72, 0.68, 1.0),
+    roughness=0.5,
+    subsurface=0.15,
+    alpha=0.10,
+    emission=(0.85, 0.72, 0.68, 1.0),
+)
+
+#: Pericytes wrap the capillary and post-capillary endothelium from the outside.
+#: Opaque, because they are discrete cells rather than tissue, and the same
+#: reason red blood cells are: every surface around them is translucent, and an
+#: object that fades with its surroundings is an object nobody can count. Cool
+#: and desaturated, which is the only way to pick them out of the red column
+#: they sit in.
+MAT_PERICYTE = dict(
+    name="MAT_Vessel_Pericyte",
+    base_color=(0.42, 0.46, 0.60, 1.0),
+    roughness=0.5,
+    subsurface=0.25,
+    alpha=0.88,
+    emission=(0.42, 0.46, 0.60, 1.0),
+)
+
+#: Endothelial cells tiled along the lumen wall. Opaque, and warm rather than
+#: the translucent :data:`MAT_ENDOTHELIAL` sheet they sit on: that sheet is the
+#: *lumen's* surface, this is the cells drawn on it, and if the two share a
+#: material the tiling vanishes into the wall it is supposed to break up.
+MAT_ENDO_CELL = dict(
+    name="MAT_Vessel_EndothelialCell",
+    base_color=(0.88, 0.66, 0.60, 1.0),
+    roughness=0.5,
+    subsurface=0.25,
+    alpha=0.90,
+    emission=(0.88, 0.66, 0.60, 1.0),
+)
+
+#: Fibrin: the strands a vessel can be laced with, so it is a mesh rather than a
+#: tissue and the only surface here at mid alpha. Opaque enough to read as a
+#: solid strand, translucent enough that cells caught in the net stay visible
+#: through it, which is the entire point of showing fibrin.
+MAT_FIBRIN = dict(
+    name="MAT_Vessel_Fibrin",
+    base_color=(0.90, 0.86, 0.84, 1.0),
+    roughness=0.5,
+    subsurface=0.15,
+    alpha=0.50,
+    emission=(0.90, 0.86, 0.84, 1.0),
+)
+
+#: A clot is fibrin that has already set, so it keeps fibrin's pale colour turned
+#: dark and opaque. The resemblance is the message: same protein, later state.
+MAT_CLOT = dict(
+    name="MAT_Vessel_FibrinClot",
+    base_color=(0.55, 0.10, 0.10, 1.0),
+    roughness=0.5,
+    subsurface=0.15,
+    alpha=0.75,
+    emission=(0.55, 0.10, 0.10, 1.0),
+)
+
 
 def _material(spec: dict):
     """Build one :data:`MAT_*` material. Emission strength starts at zero."""
@@ -352,12 +455,29 @@ def ensure_materials() -> dict:
     in a vessel looks exactly like the same cell in tissue.
     """
     return {key: _material(spec) for key, spec in (
-        # ``muscle`` and ``basement`` reuse the wall and endothelial materials
-        # as placeholders, so the shell loop's ``materials[key]`` lookup cannot
-        # KeyError before those two layers have their own. Task 2 replaces them.
-        ("outer", MAT_WALL), ("muscle", MAT_WALL),
-        ("endothelium", MAT_ENDOTHELIAL), ("basement", MAT_ENDOTHELIAL),
-        ("lumen", MAT_LUMEN), ("rbc", MAT_RBC), ("platelet", MAT_PLATELET))}
+        ("outer", MAT_WALL), ("muscle", MAT_SMOOTH_MUSCLE),
+        ("endothelium", MAT_ENDOTHELIAL), ("basement", MAT_BASEMENT),
+        ("lumen", MAT_LUMEN), ("rbc", MAT_RBC), ("platelet", MAT_PLATELET),
+        ("pericyte", MAT_PERICYTE), ("endo_cell", MAT_ENDO_CELL),
+        ("fibrin", MAT_FIBRIN), ("clot", MAT_CLOT))}
+
+
+def _selftest_materials() -> None:
+    mats = ensure_materials()
+    for key in ("muscle", "basement", "pericyte", "endo_cell", "fibrin", "clot"):
+        assert key in mats, key
+        assert mats[key].name.startswith("MAT_Vessel_"), (key, mats[key].name)
+    # The alpha budget is the whole point of this task. Bulk tissue fades back,
+    # discrete objects hold: seven nested translucent shells is the legibility
+    # risk, and the mitigation is that new shells are the MOST transparent and
+    # new cells the MOST opaque.
+    assert mats["muscle"].node_tree.nodes["Principled BSDF"].inputs["Alpha"].default_value < 0.2
+    assert mats["basement"].node_tree.nodes["Principled BSDF"].inputs["Alpha"].default_value < 0.2
+    assert mats["pericyte"].node_tree.nodes["Principled BSDF"].inputs["Alpha"].default_value > 0.8
+    assert mats["endo_cell"].node_tree.nodes["Principled BSDF"].inputs["Alpha"].default_value > 0.8
+    # Idempotent: a second call must not create a second datablock.
+    names = {m.name for m in ensure_materials().values()}
+    assert len(names) == len(mats)
 
 
 # ---------------------------------------------------------------------------
@@ -1151,6 +1271,7 @@ def create_blood_vessel(path_points, radius: float = VENULE_RADIUS_UM, *,
                         parent=parent)
     root[PROP_CLASS] = "BLOOD_VESSEL"
     root[PROP_NOTE] = ILLUSTRATIVE_NOTE
+    root[PROP_REQUESTED_RADIUS] = round(radius, 4)
 
     shells = {}
     for key in WALL_SHELL_ORDER:
@@ -1489,6 +1610,30 @@ def validate_blood_vessel(collection=None) -> dict:
                 "{}: {} a smooth muscle shell for a {:.2f} um outer radius".format(
                     root.name, "has" if "muscle" in found else "is missing",
                     found["outer"]))
+        # The two surfaces every later task places geometry against, checked
+        # against the radius this vessel was *asked* for. Ordering alone does not
+        # catch a drifted build: the shells stay correctly nested, and the
+        # containment pass below measures against the measured lumen rather than
+        # the requested one, so a lumen a micrometre too narrow is entirely
+        # self-consistent and passes every check above. Left unasserted, that
+        # drift lands in the radius of every cell, pericyte and clot placed
+        # against it for the rest of this project.
+        requested = root.get(PROP_REQUESTED_RADIUS)
+        if requested is None:
+            failures.append("{}: no {!r}, so the built radii cannot be checked "
+                            "against the radius they were built to be".format(
+                                root.name, PROP_REQUESTED_RADIUS))
+            continue
+        for key, expected in (("endothelium", requested - WALL_THICKNESS_UM),
+                              ("lumen", requested - WALL_THICKNESS_UM
+                               - LUMEN_THICKNESS_UM)):
+            tolerance = MEASURED_RADIUS_TOLERANCE * expected
+            drift = found[key] - expected
+            if abs(drift) > tolerance:
+                failures.append(
+                    "{}: the {} measures {:.2f} um, not the {:.2f} um it was built "
+                    "to be ({:+.2f} um out, tolerance {:.2f} um)".format(
+                        root.name, key, found[key], expected, drift, tolerance))
 
     # --- every component is inside the lumen, and spread along it ------------
     for root in roots:
