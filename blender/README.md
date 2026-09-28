@@ -42,12 +42,11 @@ Scaffold plus the first asset.
 ambient, render settings.
 
 **Assets:** `asset_healthy_cell.py`, `asset_tumor_cell.py`,
-`asset_immune_cells.py`, `asset_virus_hsv1.py` and `asset_blood_vessel.py` are
-implemented and validated. The last remaining `asset_*.py` (`asset_ecm.py`) and
-all six `animation_*.py` remain **API contracts only** — their entry points
-raise `NotImplementedError` with a note on what belongs there. That is
-intentional: the signatures are fixed now so nothing drifts, but no speculative
-geometry has been written.
+`asset_immune_cells.py`, `asset_virus_hsv1.py`, `asset_blood_vessel.py` and
+`asset_ecm.py` are implemented and validated. All six `animation_*.py` remain
+**API contracts only** — their entry points raise `NotImplementedError` with a
+note on what belongs there. That is intentional: the signatures are fixed now so
+nothing drifts, but no speculative geometry has been written.
 
 Validate any asset and regenerate its test collection:
 
@@ -57,10 +56,11 @@ blender --background --python blender/scripts/asset_tumor_cell.py
 blender --background --python blender/scripts/asset_immune_cells.py
 blender --background --python blender/scripts/asset_virus_hsv1.py
 blender --background --python blender/scripts/asset_blood_vessel.py
+blender --background --python blender/scripts/asset_ecm.py
 ```
 
 The test collections (`TEST_HealthyCells`, `TEST_TumorCells`,
-`TEST_ImmuneCells`, `TEST_HSV1_Virions`, `TEST_BloodVessel`) are nested under
+`TEST_ImmuneCells`, `TEST_HSV1_Virions`, `TEST_BloodVessel`, `TEST_ECM`) are nested under
 `10_DEBUG`, so excluding them from any future glTF export is structural rather
 than a convention someone has to remember at export time.
 
@@ -97,6 +97,29 @@ not what the renderer draws. The vessel's entire blood column was stacked at
 one end of the vessel with every location value correct, because
 `use_fixed_location` was off and the constraint was reading its frame-based
 `offset` instead. `validate_blood_vessel` now evaluates the depsgraph.
+
+Three more, from the extracellular matrix:
+
+- **Real collagen and visible collagen are not the same diameter.** At its
+  true 0.12 µm the matrix simply does not render, so `FIBER_RENDER_RADIUS_UM`
+  exaggerates it. But "draw it exaggerated" has a ceiling, and the ceiling is
+  set by the *substrate*, not by the asset: at 0.18 µm radius a fibre was a
+  60-pixel rope laid across a 10 µm cell. Anything drawn in front of the
+  subject competes with the subject, so the drawn value is set by how much of
+  the cell it is allowed to hide. The 0.30 µm ruffle figure above does not
+  apply here, because a ruffle is part of the cell and has to be seen.
+- **Instancing and topological connectivity are mutually exclusive.** Fibres
+  that genuinely shared junctions would need every fibre to be unique
+  geometry. They overlap and cross instead, which is what the read needs and
+  none of the cost. The docstring says so, because otherwise the next person
+  will read "interconnected" and try to fix it.
+- **Test nonuniformity with variance, not with a mean.** The first version of
+  the ECM check compared the mean density field at the fibres against the mean
+  over the region, and could not tell a working field from a broken one: the
+  field spans 0.26-0.67, so *no* algorithm moves that mean far. The check that
+  works asks whether the per-cell coefficient of variation beats what an even
+  scatter of the same count would give, and derives its other threshold from
+  what the field makes achievable rather than from a round number.
 
 ---
 
@@ -214,7 +237,7 @@ blender/scripts/
                                   # IMMUNE_DENDRITIC_*, IMMUNE_MACROPHAGE_*
     asset_virus_hsv1.py           # VIRUS_HSV1_*
     asset_blood_vessel.py         # VESSEL_*, RBC_DISC_*  (real, working)
-    asset_ecm.py                  # ECM_FIBER_*         (contract only)
+    asset_ecm.py                  # ECM_FIBER_*         (real, working)
 
     animation_virus_entry.py      # frames    1-120
     animation_replication.py      # frames  120-240
@@ -408,10 +431,9 @@ without evaluating the camera's fcurves.
   conditional on performance anyway. `cycles.volume_bounces = 0` for now. Add
   it via a volume scatter on `WORLD_Master` once there is geometry to justify
   it.
-- **The remaining asset script.** `asset_ecm` is a contract only. The five
-  completed assets are the reference for how the rest should look: constants
-  at module level, procedural geometry, a `create_*` entry point taking a
-  seed, a validator, and a render check before it is called done.
+- **Ground substance and adhesion proteins.** `asset_ecm` builds the collagen
+  network only. The hydrated gel and the fibronectin/laminin layer that
+  actually anchor cells to it are still absent.
 - **All animation.** The six `animation_*.py` scripts are contracts only.
   `asset_blood_vessel` is laid out for it: the centreline is a real curve
   object and every red blood cell carries a Follow Path constraint, so blood
@@ -424,5 +446,8 @@ without evaluating the camera's fcurves.
 
 - `00_MASTER` and `00`-numbered collections are created but only `CTRL_Master`
   exists in them; the rest gain contents as assets land.
+- `06_EXTRACELLULAR_MATRIX` is populated, but nothing samples it yet. The
+  density field it is built from (`asset_ecm.density_at`) is the intended input
+  to the viral-spread animation, which is deliberately not written.
 - No `.blend` is committed to git — the scene is fully regenerable from
   `scene_tumor.py`. See the repository `.gitignore`.
