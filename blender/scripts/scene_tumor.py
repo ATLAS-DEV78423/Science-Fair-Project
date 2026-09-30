@@ -27,6 +27,7 @@ import bpy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utilities as ut  # noqa: E402
+import asset_ecm  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Tunable constants
@@ -81,6 +82,17 @@ FRAME_RANGE = (1, 240)
 SAMPLES_PREVIEW = 64
 SAMPLES_FINAL = 256
 
+#: The ECM's own DEFAULT_BOUNDS_UM, density and seed are the scene's values too.
+#: They are not restated here: the asset module owns its dimensions, and a copy
+#: in the scene builder is a second place for the two to drift apart. Change the
+#: constants in ``asset_ecm.py``.
+#:
+#: The matrix is parented to CTRL_Master, not to CTRL_Tumor, because it is
+#: shared: the vessel, the tumour and the healthy tissue all sit *in* it. A
+#: matrix parented to the tumour would travel with the tumour and drag the
+#: vessel's surroundings along with it.
+ECM_PARENT = "CTRL_Master"
+
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -123,6 +135,19 @@ def build_cameras(ctrl_camera):
         made.append(cam)
     bpy.context.scene.camera = bpy.data.objects["CAMERA_Master"]
     return made
+
+
+def build_ecm(ctrl_master):
+    """Scatter the collagen network through ``06_EXTRACELLULAR_MATRIX``.
+
+    Idempotent, like every other builder here: ``create_ecm_region`` clears the
+    ECM prefix first, so a re-run is a rebuild rather than an accumulation.
+
+    Returns the fibre objects. Hide them with ``asset_ecm.set_ecm_visible``
+    rather than deleting -- the matrix is what makes the other cells read as
+    tissue instead of as objects in a void, so it goes behind them, not away.
+    """
+    return asset_ecm.create_ecm_region(parent=ctrl_master)
 
 
 def build_lighting():
@@ -252,6 +277,7 @@ def build(reset: bool = True, samples: int = SAMPLES_PREVIEW) -> dict:
     controllers = build_controllers()
     cameras = build_cameras(controllers["CTRL_Camera"])
     lights = build_lighting()
+    fibers = build_ecm(controllers[ECM_PARENT])
     build_world(scene)
     setup_render_settings(scene, samples=samples)
     ut.purge_orphans()
@@ -262,6 +288,7 @@ def build(reset: bool = True, samples: int = SAMPLES_PREVIEW) -> dict:
         "controllers": list(controllers),
         "cameras": [c.name for c in cameras],
         "lights": [l.name for l in lights],
+        "ecm_fibers": len(fibers),
         "engine": scene.render.engine,
         "scene_camera": scene.camera.name if scene.camera else None,
         "unit_scale_length": scene.unit_settings.scale_length,

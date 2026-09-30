@@ -33,12 +33,21 @@ so the rate comparison is not handed an excuse by differing period ranges.
 
 That is enforced by measurement rather than by convention.
 :func:`validate_idle` samples the evaluated F-curves, derives the peak
-per-frame travel of the membrane surface for each class, and fails the build if
-tumour ever exceeds healthy. A constant comparison would only prove the table
-was edited consistently; measuring the curves also catches a regression that
-arrives through the period pool or the phase offsets. The morphology half of
-the claim -- the noise scale -- is asserted directly, because a spatial
-frequency is a shape parameter and a rate measurement cannot see it.
+per-frame travel of every animated part of each class, and fails the build if
+tumour ever exceeds healthy -- on any channel, and across all of them. A
+constant comparison would only prove the table was edited consistently;
+measuring the curves also catches a regression that arrives through the period
+pool or the phase offsets. The morphology half of the claim -- the noise scale
+-- is asserted directly, because a spatial frequency is a shape parameter and a
+rate measurement cannot see it.
+
+The nucleus is where this bites. The spec allows a tumour nucleus to *wobble
+more* than a healthy one but not to move faster, and on an equal period a bigger
+amplitude is necessarily a faster rate, so the two cannot both hold. The wobble
+is therefore paid for in period: :func:`_nucleus_period` draws the nucleus cycle
+separately and widens a tumour cell's to the shortest value in its pool that
+leaves its rate strictly below the healthy cell of the same index's. The
+amplitude stays at the spec's 0.14 and the constraint is a checked one.
 
 Looping
 -------
@@ -123,6 +132,34 @@ PERIOD_DIVISORS = (240, 120, 80, 60, 48, 40)
 MEMBRANE_MODIFIER = "MOD_MembraneDeform"
 MEMBRANE_STRENGTH_PATH = 'modifiers["{}"].strength'.format(MEMBRANE_MODIFIER)
 
+#: Prefix on every action this module creates. Marks ownership, so the
+#: validator's checks police only the idle layer's curves and a beat that also
+#: keys a cell cannot be failed by them, and so the idle layer is identifiable
+#: in the outliner without knowing which objects it touches.
+ACTION_PREFIX = "ACT_Idle_"
+
+#: MESH children a cell root is expected to have: membrane, cytoplasm, nucleus
+#: -- plus a dendritic cell's process mesh. See :func:`_layered_parts` for why
+#: the count is checked rather than assumed.
+KNOWN_LAYER_COUNTS = (3, 4)
+
+#: Range a layer must fall in, as a fraction of its membrane's extent, to be
+#: bound as the nucleus. The asset modules declare healthy at 0.45, tumour at
+#: 0.38-0.66 and immune at 0.38-0.72 of the membrane radius; the bound is on the
+#: bounding-box extent, which is inflated by each layer's own aspect, so the
+#: ceiling sits above the declared maximum. Measured across the validator's own
+#: population the bound ratios run 0.40 to 0.75.
+#:
+#: The floor is the fence. Below it is the case a bare "smallest child" rule
+#: gets wrong in the dangerous direction: a future small organelle parented to
+#: the root would silently become the thing the validator believes it is
+#: measuring. The ceiling bounds the term -- it is what a cytoplasm-sized layer
+#: would be judged against, and it fires on a cell built with no nucleus and
+#: nothing smaller than its cytoplasm, which the layer-count fence below
+#: normally catches first. A mid-sized new layer inside the band is the residual
+#: neither fence catches, and it is stated rather than papered over.
+NUCLEUS_SIZE_RATIO = (0.25, 0.85)
+
 #: Radius of the closed drift path an immune cell's root walks, in micrometres,
 #: before :data:`IDLE_MOTION_SCALE`. Immune cells genuinely patrol, and this is
 #: the only channel in the project that translates a cell at all -- one class
@@ -183,38 +220,86 @@ IDLE_SPECS = {
     ),
 }
 
+#: How much faster a tumour nucleus moves than a healthy one *would* at the
+#: same period, purely from its larger amplitude. The design spec allows the
+#: tumour nucleus to wobble more but not to move faster, so this much period has
+#: to be added to pay for the amplitude. Derived from the table rather than
+#: typed, so editing an amplitude cannot leave the two disagreeing.
+NUCLEUS_RATE_RATIO = (IDLE_SPECS["tumor"]["nucleus_amplitude"]
+                      / IDLE_SPECS["healthy"]["nucleus_amplitude"])
+
+#: Slack when comparing a drawn period against a required floor. A period is
+#: chosen only if it is strictly longer than the floor, so this never decides a
+#: case; it just stops float noise from making "exactly long enough" ambiguous.
+PERIOD_EPSILON = 1e-9
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 
 
 def _layered_parts(root):
-    """The membrane and nucleus under *root*, found without parsing a name.
+    """The membrane and nucleus under *root*, and any problem binding them.
 
-    The membrane is the child carrying the deformation modifier that every
-    asset module already attaches. Of the remaining children the nucleus is the
-    smallest: membrane > cytoplasm > nucleus is an invariant all three modules
-    build to, and two of them already assert it. Which child belongs to which
-    cell is carried by parenting, never by a substring of its name.
+    Returns ``(membrane, nucleus, problem)``; *problem* is a sentence or None.
+
+    The membrane is unambiguous and is checked, not assumed: it is the child
+    carrying the deformation modifier every asset module attaches, exactly one
+    child must carry it.
+
+    The nucleus is *not* marked anywhere. Which child belongs to which cell is
+    carried by parenting, and a part's role is not carried at all, so the only
+    structural signal left is size: the nucleus is the smallest layer, because
+    membrane > cytoplasm > nucleus is how all three asset modules build. That is
+    a heuristic, so it is fenced rather than trusted, and both fences report
+    instead of guessing:
+
+    * a root whose layer count this module has not seen is a new layer in an
+      asset module, where the smallest child may no longer be the nucleus;
+    * a bound layer outside :data:`NUCLEUS_SIZE_RATIO` of its membrane is not
+      nucleus-shaped -- too big to be a nucleus (that is a cytoplasm) or too
+      small to be one (that is some new organelle, which a bare
+      "smallest child" rule would have bound silently).
+
+    :func:`validate_idle` turns every problem into a build failure, so a future
+    layer breaks the build here instead of quietly animating the cytoplasm.
     """
     children = [child for child in root.children if child.type == "MESH"]
     membranes = [c for c in children if c.modifiers.get(MEMBRANE_MODIFIER)]
-    if not membranes:
-        return None, None
+    if len(membranes) != 1:
+        return None, None, "{}: expected exactly 1 membrane, found {}".format(
+            root.name, len(membranes))
+    if len(children) not in KNOWN_LAYER_COUNTS:
+        return None, None, (
+            "{}: {} mesh layers, expected one of {}; this module cannot tell "
+            "which is the nucleus".format(
+                root.name, len(children), list(KNOWN_LAYER_COUNTS)))
+
     membrane = membranes[0]
-    rest = [c for c in children if c is not membrane]
-    return membrane, (min(rest, key=lambda c: max(c.dimensions)) if rest else None)
+    sizes = {child: max(child.dimensions) for child in children}
+    nucleus = min((c for c in children if c is not membrane), key=lambda c: sizes[c],
+                  default=None)
+    if nucleus is None:
+        return None, None, "{}: has a membrane and nothing else".format(root.name)
+    ratio = sizes[nucleus] / sizes[membrane] if sizes[membrane] > 0.0 else 0.0
+    if not NUCLEUS_SIZE_RATIO[0] <= ratio <= NUCLEUS_SIZE_RATIO[1]:
+        return None, None, (
+            "{}: its smallest layer is {:.0%} of the membrane, outside the "
+            "nucleus range {}; it is not the nucleus".format(
+                root.name, ratio, list(NUCLEUS_SIZE_RATIO)))
+    return membrane, nucleus, None
 
 
-def _discover(cls, collection=None) -> list:
-    """Every cell of one class, as ``(index, root, membrane, nucleus)``.
+def _discover(cls, collection=None):
+    """Every cell of one class, as ``(cells, problems)``.
 
-    The ordinal is read off the root's name because that *is* the project's
-    identity key, and a cell's idle motion has to be a pure function of it.
+    *cells* holds ``(index, root, membrane, nucleus)``. The ordinal is read off
+    the root's name because that *is* the project's identity key, and a cell's
+    idle motion has to be a pure function of it.
     """
     spec = IDLE_SPECS[cls]
     coll = collection or ut.resolve_collection(spec["collection"])
-    cells = []
+    cells, problems = [], []
     for root in sorted(coll.objects, key=lambda obj: obj.name):
         if root.type != "EMPTY" or not root.name.startswith(spec["prefix"]):
             continue
@@ -222,16 +307,22 @@ def _discover(cls, collection=None) -> list:
             index = int(root.name.rsplit("_", 1)[1])
         except (IndexError, ValueError):
             continue
-        membrane, nucleus = _layered_parts(root)
-        if membrane is None or nucleus is None:
+        membrane, nucleus, problem = _layered_parts(root)
+        if problem is not None:
+            problems.append(problem)
             continue
         cells.append((index, root, membrane, nucleus))
-    return cells
+    return cells, problems
 
 
-def _discover_all(collection=None) -> list:
-    """Every cell in the scene, across all three classes."""
-    return [(cls,) + cell for cls in IDLE_SPECS for cell in _discover(cls, collection)]
+def _discover_all(collection=None):
+    """Every cell in the scene, across all three classes, plus any problems."""
+    cells, problems = [], []
+    for cls in IDLE_SPECS:
+        found, found_problems = _discover(cls, collection)
+        cells.extend((cls,) + cell for cell in found)
+        problems.extend(found_problems)
+    return cells, problems
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +353,53 @@ def cell_period(index: int, cls: str) -> int:
     Always an exact divisor of :data:`LOOP_FRAMES`, asserted on the way out.
     """
     return _period_and_phase(index, cls)[0]
+
+
+def _nucleus_period(index: int, cls: str) -> int:
+    """The nucleus cycle length for one cell, drawn separately from the cell's.
+
+    The design spec allows a tumour nucleus to *wobble more* than a healthy
+    one but not to move faster, and the two cannot both hold on the same
+    period: a bigger amplitude over an equal period is necessarily a faster
+    rate. So the extra wobble is paid for in period, which is the only lever
+    that satisfies both halves of the sentence. For a tumour cell the draw is
+    therefore widened to the shortest period in its own pool that leaves its
+    rate strictly below the healthy cell of the same index's.
+
+    Drawn from the pool minus :data:`LOOP_FRAMES`: that is the one value with
+    no longer partner, so a cell drawn onto it could never be stretched far
+    enough and the constraint would be unsatisfiable rather than merely slow.
+    """
+    spec = IDLE_SPECS[cls]
+    pool = tuple(p for p in spec["period_pool"] if p < LOOP_FRAMES)
+    rng = random.Random("nucleus:{}:{}".format(cls, index))
+    period = pool[rng.randrange(len(pool))]
+    assert LOOP_FRAMES % period == 0, (
+        "idle nucleus period {} does not divide LOOP_FRAMES {}; the loop jumps "
+        "at the seam".format(period, LOOP_FRAMES))
+
+    if cls != "tumor":
+        return period
+
+    counterpart = _nucleus_period(index, "healthy")
+    floor = NUCLEUS_RATE_RATIO * counterpart
+    longer = [p for p in spec["period_pool"] if p > floor - PERIOD_EPSILON]
+    assert longer, (
+        "no nucleus period in the tumour pool is longer than {} frames, which "
+        "is what a nucleus amplitude of {} needs to stay slower than a healthy "
+        "nucleus of {} at amplitude {} on {} frames".format(
+            floor, spec["nucleus_amplitude"],
+            IDLE_SPECS["healthy"]["nucleus_amplitude"], counterpart))
+    period = min(longer)
+    # The claim the validator asserts, written where the choice is made, so a
+    # pool edit cannot quietly produce an equal-rate pair on a knife edge.
+    assert spec["nucleus_amplitude"] / period < \
+        IDLE_SPECS["healthy"]["nucleus_amplitude"] / counterpart, (
+            "tumour nucleus rate is not strictly below healthy's for cell "
+            "{}: {} on {} frames vs {} on {} frames".format(
+                index, spec["nucleus_amplitude"], period,
+                IDLE_SPECS["healthy"]["nucleus_amplitude"], counterpart))
+    return period
 
 
 def _path_plane(rng) -> tuple:
@@ -306,11 +444,13 @@ def _closed_path(origin: Vector, axis_a, axis_b, amplitude: float,
 
 
 def _fcurves(obj) -> list:
-    """The F-curves on *obj*, read through the slotted-action API.
+    """Every F-curve on *obj*, read through the slotted-action API.
 
     ``Action.fcurves`` is gone in Blender 5, so this walks the action's layers
-    down to the channelbag for the object's own slot. An object with no
-    animation yet, or none of this module's, yields an empty list.
+    down to the channelbag for the object's own slot. This is every curve on
+    the object, not only this module's -- :func:`_is_idle` is what narrows it,
+    and :func:`_finish` needs the general form because a channel is written and
+    then looked up before it is tagged.
     """
     data = obj.animation_data
     if data is None or data.action is None or data.action_slot is None:
@@ -324,6 +464,19 @@ def _fcurves(obj) -> list:
             if bag is not None:
                 found.extend(bag.fcurves)
     return found
+
+
+def _is_idle(obj) -> bool:
+    """Whether *obj*'s action is one this module created.
+
+    A cell that a beat has also keyed carries both, and the idle layer's
+    checks must police only its own curves: a beat's frame 1 and frame 241 are
+    not supposed to match, and failing the build over that would be wrong.
+    """
+    data = obj.animation_data
+    return (data is not None and data.action is not None
+            and data.action.name.startswith(ACTION_PREFIX))
+
 
 
 def _finish(obj, data_path: str, indices: tuple) -> list:
@@ -356,9 +509,19 @@ def _key(obj, data_path: str, samples: list, apply, indices: tuple) -> list:
     channels this module owns are reached differently: a Displace strength is a
     scalar on a nested struct, a location is a whole vector.
     """
+    before = obj.animation_data.action if obj.animation_data else None
     for frame, value in sorted(samples, key=lambda pair: pair[0]):
         apply(value)
         obj.keyframe_insert(data_path=data_path, frame=frame)
+
+    # An action this call created is tagged as the idle layer's, so the
+    # validator's checks can tell it from a beat's curves on the same object. A
+    # pre-existing action keeps whatever it was called: relabelling a beat's
+    # keys as ours would be worse than not tagging at all.
+    action = obj.animation_data.action
+    if action is not None and action is not before \
+            and not action.name.startswith(ACTION_PREFIX):
+        action.name = ACTION_PREFIX + obj.name
     return _finish(obj, data_path, indices)
 
 
@@ -368,7 +531,7 @@ def _key(obj, data_path: str, samples: list, apply, indices: tuple) -> list:
 
 
 def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
-                 motion_scale: float = IDLE_MOTION_SCALE,
+                 motion_scale: float | None = None,
                  frame_start: int = 1, frame_end: int = LOOP_FRAMES,
                  collection=None) -> dict:
     """Key ambient idle motion onto every cell in the scene. Idempotent.
@@ -383,8 +546,14 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
             deliberately unused: the idle layer animates cells where they
             already are and must not depend on a controller existing, because
             it runs underneath all six beats whether or not they are staged.
-        motion_scale: Amplitude multiplier. ``0.0`` writes flat curves rather
-            than deleting them, so a pause cannot desynchronise the beats.
+        motion_scale: Amplitude multiplier. ``None`` -- the default -- reads
+            :data:`IDLE_MOTION_SCALE` *at call time*, not at def time, so that
+            :func:`set_idle_motion` is the only thing that decides the
+            amplitude. A default of ``IDLE_MOTION_SCALE`` would be bound when
+            this function is defined and every later rebind would be ignored,
+            which silently disabled reduced motion for every caller that omits
+            the argument. ``0.0`` writes flat curves rather than deleting them,
+            so a pause cannot desynchronise the beats.
         frame_start: Frame the first key of a cycle sits on.
         frame_end: Last frame of the range the report is measured over.
         collection: Search here instead of each class's own collection. For
@@ -392,11 +561,15 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
 
     Returns:
         A report dict: per-class cell and curve counts, the periods and phases
-        drawn, the noise scale owned per class, and the measured peak travel
-        per channel per class. :func:`validate_idle` reads the peaks.
+        drawn, the noise scale owned per class, any layer-binding problems, and
+        the measured peak travel per channel per class. :func:`validate_idle`
+        reads the peaks and the problems.
     """
+    if motion_scale is None:
+        motion_scale = IDLE_MOTION_SCALE
     classes = {}
     moved = []
+    problems = []
     curves_written = keys_written = 0
 
     for cls, spec in IDLE_SPECS.items():
@@ -409,8 +582,12 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
         if texture is not None:
             texture.noise_scale = spec["noise_scale"]
 
-        periods, phases, class_curves, class_keys = [], [], 0, 0
-        for index, root, membrane, nucleus in _discover(cls, collection):
+        found, found_problems = _discover(cls, collection)
+        problems.extend(found_problems)
+
+        periods, phases, nucleus_periods = [], [], {}
+        class_curves, class_keys = 0, 0
+        for index, root, membrane, nucleus in found:
             # Idempotent by construction: the project has been bitten by
             # stacked F-curves once, and this is the documented cure.
             ut.clear_animation(membrane)
@@ -439,12 +616,16 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
 
             # The nucleus drifts about its authored off-centre rest pose, not
             # about the cell centre -- an unkeyed nucleus would jump to centre
-            # the moment the keys were written.
+            # the moment the keys were written. Its own period, not the cell's:
+            # see _nucleus_period for why a tumour nucleus is stretched.
+            n_period = _nucleus_period(index, cls)
+            n_start = frame_start + rng.randrange(n_period)
+            nucleus_periods[index] = n_period
             written = _key(
                 nucleus, "location",
                 _closed_path(nucleus.location.copy(), *_path_plane(rng),
                              spec["nucleus_amplitude"] * motion_scale,
-                             start, period),
+                             n_start, n_period),
                 lambda value: setattr(nucleus, "location", value),
                 (0, 1, 2),
             )
@@ -473,6 +654,7 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
             "keyframes": class_keys,
             "periods": periods,
             "phases": phases,
+            "nucleus_periods": nucleus_periods,
         }
 
     peaks = {cls: {"surface": 0.0, "nucleus": 0.0, "drift": 0.0} for cls in IDLE_SPECS}
@@ -486,8 +668,12 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
         "keyframes": keys_written,
         "motion_scale": motion_scale,
         "frame_range": [frame_start, frame_end],
+        "problems": problems,
         "noise_scale": {cls: spec["noise_scale"] for cls, spec in IDLE_SPECS.items()},
-        "peak_speed": {cls: peaks[cls]["surface"] for cls in IDLE_SPECS},
+        # The guarded figure: the worst any channel of the class moves, which is
+        # what an audience could read as the class's speed. Per-channel numbers
+        # are reported underneath it, not instead of it.
+        "peak_speed": {cls: max(peaks[cls].values()) for cls in IDLE_SPECS},
         "peak_speed_by_channel": peaks,
     }
 
@@ -495,12 +681,15 @@ def animate_idle(healthy_ctrl=None, tumor_ctrl=None, immune_ctrl=None,
 def set_idle_motion(scale: float, collection=None) -> float:
     """Set the global amplitude multiplier and re-key. Returns the new scale.
 
-    The accessibility control. Re-keys rather than rescales the existing curves
-    so one number is the only thing that decides how loud the idle layer is.
+    The accessibility control, and the only way the scale is meant to be set.
+    Re-keys rather than rescales the existing curves, so one number decides how
+    loud the idle layer is. The rebind takes effect for every later call that
+    omits ``motion_scale``, because :func:`animate_idle` reads this value at
+    call time rather than having captured it when it was defined.
     """
     global IDLE_MOTION_SCALE
     IDLE_MOTION_SCALE = float(scale)
-    animate_idle(motion_scale=IDLE_MOTION_SCALE, collection=collection)
+    animate_idle(collection=collection)
     return IDLE_MOTION_SCALE
 
 
@@ -511,8 +700,9 @@ def clear_idle(collection=None) -> int:
     curves and keeps the timeline structure. This is the blunt instrument, for
     handing the scene back to a state with no idle layer at all.
     """
+    cells, _problems = _discover_all(collection)
     cleared = 0
-    for cls, _index, root, membrane, nucleus in _discover_all(collection):
+    for cls, _index, root, membrane, nucleus in cells:
         targets = (membrane, nucleus, root) if IDLE_SPECS[cls]["drifts"] \
             else (membrane, nucleus)
         for obj in targets:
@@ -535,6 +725,22 @@ def _peak_travel(curves: list, frame_start: int, frame_end: int) -> float:
     channel reduces to the absolute difference; several, as a location's three
     axes, are combined as a vector, because a three-axis drift is one movement
     and no viewer would ever see three separate ones.
+
+    What this measures, exactly: for the *location* channels it is the real
+    motion, since a location is a position in micrometres. For the membrane
+    *strength* channel it is the rate of the displacement scale, not the surface
+    speed itself. A Displace modifier moves a point by
+    ``strength * (tex(p) - mid_level)`` along its normal, so a point's real
+    speed is this rate multiplied by that per-vertex texture offset. The
+    multiplier is fixed for a given texture, and the two classes' textures are
+    both Clouds noise with the same mid-level and the same value range --
+    ``noise_scale`` changes the *spatial frequency* of the noise, not its value
+    distribution -- so the offset is the same distribution on both sides and
+    scales both classes alike. Comparing the rate therefore orders the two
+    classes' surface speeds the same way, which is what the guard needs; the
+    figure is a proportional measure of surface speed, not the surface speed
+    itself, and is not comparable against a healthy and a differently-textured
+    cell in isolation.
     """
     peak = 0.0
     previous = [curve.evaluate(frame_start) for curve in curves]
@@ -604,12 +810,21 @@ def build_test_cells(collection=None) -> list:
 
 
 def _idle_fcurves(collection=None) -> list:
-    """Every F-curve this module owns across the scene, paired with its object."""
+    """Every F-curve this module wrote, paired with its object.
+
+    Filtered on the action tag rather than on the channel, because the channel
+    names overlap with the beat layer's: a beat keys a cell's location too, and
+    the checks below are statements about the idle layer's looping, not about
+    the beat's.
+    """
+    cells, _problems = _discover_all(collection)
     out = []
-    for cls, _index, root, membrane, nucleus in _discover_all(collection):
-        for obj in (membrane, nucleus, root) if IDLE_SPECS[cls]["drifts"] \
-                else (membrane, nucleus):
-            out.extend((obj, curve) for curve in _fcurves(obj))
+    for cls, _index, root, membrane, nucleus in cells:
+        targets = (membrane, nucleus, root) if IDLE_SPECS[cls]["drifts"] \
+            else (membrane, nucleus)
+        for obj in targets:
+            if _is_idle(obj):
+                out.extend((obj, curve) for curve in _fcurves(obj))
     return out
 
 
@@ -622,7 +837,14 @@ def validate_idle(collection=None) -> dict:
 
     Every check is a measurement of the built result, not a restatement of how
     :func:`animate_idle` was written. Returns ``{"ok", "failures", "checks"}``.
+
+    The loop is always keyed from the default anchor, :data:`LOOP_FRAMES` long;
+    it is named here rather than written into the checks as bare numbers so the
+    two frames the seam check samples are traceable to the parameters rather
+    than magic.
     """
+    frame_start, frame_end = 1, LOOP_FRAMES
+    seam_frame = frame_start + LOOP_FRAMES
     coll = collection or ut.get_or_create_collection(
         TEST_COLLECTION, ut.resolve_collection("10_DEBUG"))
     build_test_cells(coll)
@@ -632,10 +854,14 @@ def validate_idle(collection=None) -> dict:
     # Check 7 of the design: this is an animation feature and must not quietly
     # become a geometry feature.
     objects_before = _object_count()
-    report = animate_idle(collection=coll)
+    report = animate_idle(collection=coll, frame_start=frame_start,
+                          frame_end=frame_end)
     if _object_count() != objects_before:
         failures.append("animating changed the object count: {} then {}".format(
             objects_before, _object_count()))
+
+    # --- layer binding, reported by the build that made it ---------------
+    failures.extend(report["problems"])
 
     classes = report["classes"]
     checks = {
@@ -643,6 +869,7 @@ def validate_idle(collection=None) -> dict:
         "fcurves": report["fcurves"],
         "keyframes": report["keyframes"],
         "periods": sorted({p for e in classes.values() for p in e["periods"]}),
+        "nucleus_periods": {cls: e["nucleus_periods"] for cls, e in classes.items()},
         "healthy_peak_speed": report["peak_speed"]["healthy"],
         "tumor_peak_speed": report["peak_speed"]["tumor"],
         "immune_peak_speed": report["peak_speed"]["immune"],
@@ -661,33 +888,88 @@ def validate_idle(collection=None) -> dict:
     if not curves:
         failures.append("no idle F-curves were written")
     for obj, curve in curves:
-        first = curve.evaluate(1)
-        seam = curve.evaluate(LOOP_FRAMES + 1)
+        first = curve.evaluate(frame_start)
+        seam = curve.evaluate(seam_frame)
         if abs(first - seam) > 1e-4:
             failures.append(
-                "{}: {} does not close the loop ({} at frame 1, {} at frame {})".format(
-                    obj.name, curve.data_path, first, seam, LOOP_FRAMES + 1))
+                "{}: {} does not close the loop ({} at frame {}, {} at frame {})".format(
+                    obj.name, curve.data_path, first, frame_start, seam, seam_frame))
             break
 
-    # --- 2. tumour is not faster than healthy ----------------------------
-    # The governing constraint, measured per class off the evaluated membrane
-    # curves. Peak *surface* travel is the quantity the claim is about: what an
-    # audience reads as how fast a cell moves is the silhouette. The nucleus is
-    # an interior channel and is reported alongside, not substituted for it --
-    # the brief gives tumour a deliberately larger nucleus amplitude, so a
-    # guard on the interior would contradict the brief's own numbers rather
-    # than enforce the science.
-    healthy_peak = peaks["healthy"]["surface"]
-    tumor_peak = peaks["tumor"]["surface"]
+    # --- 2. tumour is not faster than healthy, on every channel ----------
+    # The governing constraint, measured per class over *all* channels: the
+    # worst travel of any animated part of the class. No carve-out, because a
+    # carve-out is a constraint that erodes -- with the nucleus excluded, a
+    # later edit that doubled tumour nucleus_amplitude would leave this build
+    # green. The nucleus's larger amplitude is paid for in period by
+    # _nucleus_period, which is where the spec puts the lever.
+    #
+    # _peak_travel is a proportional measure for the membrane channel and the
+    # real motion for the location channels; see its docstring for why the
+    # membrane's texture factor does not reorder the two classes.
+    #
+    # Per channel *and* combined. The combined figure is what the brief asks
+    # for and it is the headline, but on its own it is too coarse: the nucleus
+    # channel is several times the membrane channel in these units, so a tumour
+    # membrane sped up past healthy's would hide behind a correctly slowed
+    # nucleus and the build would stay green. Asserting the ordering channel by
+    # channel is strictly stronger -- ordered parts give an ordered maximum --
+    # and it is what makes a per-channel regression impossible to hide.
+    for channel in ("surface", "nucleus", "drift"):
+        if peaks["tumor"][channel] > peaks["healthy"][channel]:
+            failures.append(
+                "tumour {} peak {:.6f} um/frame exceeds healthy's {:.6f}; the "
+                "animation would imply that cancer cells move faster, which is "
+                "false -- express the difference as morphology, not rate".format(
+                    channel, peaks["tumor"][channel], peaks["healthy"][channel]))
+    healthy_peak = report["peak_speed"]["healthy"]
+    tumor_peak = report["peak_speed"]["tumor"]
     if tumor_peak > healthy_peak:
         failures.append(
-            "tumour membrane peak speed {:.6f} um/frame exceeds healthy's {:.6f}; "
-            "the animation would imply that cancer cells move faster, which is "
-            "false -- express the difference as morphology, not rate".format(
-                tumor_peak, healthy_peak))
+            "tumour peak speed {:.6f} um/frame exceeds healthy's {:.6f} across all "
+            "channels (tumour {} vs healthy {}); the animation would imply that "
+            "cancer cells move faster, which is false".format(
+                tumor_peak, healthy_peak,
+                {k: round(v, 6) for k, v in peaks["tumor"].items() if v > 0.0},
+                {k: round(v, 6) for k, v in peaks["healthy"].items() if v > 0.0}))
+
+    # The rule the stretch implements, asserted on the drawn periods rather
+    # than left to be implied by the measurement above.
+    for index, tumor_period in sorted(classes["tumor"]["nucleus_periods"].items()):
+        healthy_period = classes["healthy"]["nucleus_periods"].get(index)
+        if healthy_period is None:
+            failures.append("tumor cell {} has no healthy counterpart to compare "
+                            "its nucleus period against".format(index))
+            continue
+        if tumor_period < healthy_period:
+            failures.append(
+                "tumor cell {} nucleus period {} is shorter than healthy's {}; the "
+                "spec allows a bigger wobble, not a faster one".format(
+                    index, tumor_period, healthy_period))
+        if IDLE_SPECS["tumor"]["nucleus_amplitude"] / tumor_period \
+                >= IDLE_SPECS["healthy"]["nucleus_amplitude"] / healthy_period:
+            failures.append(
+                "tumor cell {} nucleus amplitude/period is not below healthy's "
+                "({}/{} vs {}/{}); the bigger wobble is not paid for in period".format(
+                    index, IDLE_SPECS["tumor"]["nucleus_amplitude"], tumor_period,
+                    IDLE_SPECS["healthy"]["nucleus_amplitude"], healthy_period))
 
     # --- 3. reduced motion is quieter, pause is flat ---------------------
-    quiet = animate_idle(motion_scale=0.3, collection=coll)["peak_speed_by_channel"]
+    # Deliberately through set_idle_motion, then animate_idle with the argument
+    # *omitted*. That is the path the spec names as the only way the scale gets
+    # set, and it is the one that was broken: a default of IDLE_MOTION_SCALE is
+    # bound when the def is executed, so every later rebind is ignored and
+    # reduced motion silently does nothing for any caller that omits the
+    # argument. Passing the value explicitly here would test none of that.
+    if set_idle_motion(0.3, coll) != 0.3:
+        failures.append("set_idle_motion(0.3) did not return the new scale")
+    quiet = animate_idle(collection=coll)
+    if quiet["motion_scale"] != 0.3:
+        failures.append(
+            "animate_idle() ignored the scale set by set_idle_motion: report "
+            "says {}, expected 0.3. The default is being captured at def time "
+            "instead of read at call time.".format(quiet["motion_scale"]))
+    quiet = quiet["peak_speed_by_channel"]
     for cls in IDLE_SPECS:
         for channel in ("surface", "nucleus", "drift"):
             if quiet[cls][channel] > peaks[cls][channel] + 1e-9:
@@ -695,23 +977,27 @@ def validate_idle(collection=None) -> dict:
                                 "{:.6f} vs {:.6f}".format(
                                     cls, channel, quiet[cls][channel],
                                     peaks[cls][channel]))
-    if set_idle_motion(0.0, coll) != 0.0:
-        failures.append("set_idle_motion(0.0) did not return the new scale")
+    set_idle_motion(0.0, coll)
     for obj, curve in _idle_fcurves(coll):
-        if abs(curve.evaluate(1) - curve.evaluate(LOOP_FRAMES // 2)) > 1e-9:
+        if abs(curve.evaluate(frame_start) - curve.evaluate(frame_end // 2)) > 1e-9:
             failures.append("{}: {} is not flat at motion_scale=0.0".format(
                 obj.name, curve.data_path))
             break
     set_idle_motion(1.0, coll)
-    report = animate_idle(collection=coll)
+    report = animate_idle(collection=coll, frame_start=frame_start,
+                          frame_end=frame_end)
     peaks = report["peak_speed_by_channel"]
     checks["healthy_peak_speed"] = report["peak_speed"]["healthy"]
     checks["tumor_peak_speed"] = report["peak_speed"]["tumor"]
     checks["immune_peak_speed"] = report["peak_speed"]["immune"]
 
     # --- 4. periods divide the loop --------------------------------------
+    # Both channels: the nucleus has its own period now, and a nucleus cycle
+    # that did not divide the loop would jump at the seam just as a membrane
+    # one would.
     for cls, entry in classes.items():
-        for period in entry["periods"]:
+        drawn = list(entry["periods"]) + list(entry["nucleus_periods"].values())
+        for period in drawn:
             if LOOP_FRAMES % period != 0:
                 failures.append("{}: period {} does not divide {}".format(
                     cls, period, LOOP_FRAMES))
@@ -725,7 +1011,8 @@ def validate_idle(collection=None) -> dict:
                                 "divisor of {}".format(period, LOOP_FRAMES))
 
     # --- 5. the population is not synchronised ---------------------------
-    all_periods = {p for e in classes.values() for p in e["periods"]}
+    all_periods = {p for e in classes.values()
+                   for p in list(e["periods"]) + list(e["nucleus_periods"].values())}
     all_phases = {p for e in classes.values() for p in e["phases"]}
     if len(all_periods) < 2:
         failures.append("every cell shares one period ({}); the population moves "
@@ -789,8 +1076,8 @@ def validate_idle(collection=None) -> dict:
             failures.append("{}: noise_scale is {}, expected {}; a rebuild reverted "
                             "the class's morphology".format(
                                 cls, measured, spec["noise_scale"]))
-    if peaks["tumor"]["surface"] <= 0.0 or peaks["healthy"]["surface"] <= 0.0:
-        failures.append("membrane surfaces did not move at all; the layer is inert")
+    if report["peak_speed"]["tumor"] <= 0.0 or report["peak_speed"]["healthy"] <= 0.0:
+        failures.append("no channel moved at all; the layer is inert")
 
     # --- the hazard, exercised rather than described ---------------------
     # Every asset module's _add_membrane_deformation reassigns noise_scale, so

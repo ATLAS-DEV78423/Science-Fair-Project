@@ -420,6 +420,25 @@ def create_ecm_region(bounds=DEFAULT_BOUNDS_UM, density: float = 1.0,
 # ---------------------------------------------------------------------------
 
 
+def set_ecm_visible(visible: bool, collection=None) -> int:
+    """Show or hide the matrix. Returns the number of objects toggled.
+
+    Operates on the collection's ``hide_viewport`` / ``hide_render`` flags
+    rather than looping over fibres. With a few hundred to a few thousand
+    instances that is the difference between one flag write and a walk of the
+    whole network, and it cannot leave a single fibre stranded as a visible
+    speck over a supposedly hidden matrix.
+
+    Toggling the collection does not touch the geometry, so this is cheap
+    enough to call per frame from an animation if a shot needs the matrix to
+    appear or vanish.
+    """
+    coll = collection or ut.resolve_collection(COLLECTION)
+    coll.hide_viewport = not visible
+    coll.hide_render = not visible
+    return len(coll.objects)
+
+
 def build_test_matrix(collection=None, bounds=DEFAULT_BOUNDS_UM,
                       density: float = TEST_DENSITY, seed: int = 0,
                       clear: bool = True):
@@ -627,6 +646,17 @@ def validate_ecm(collection=None, bounds=DEFAULT_BOUNDS_UM,
     suffix_drift = [o.name for o in coll.objects if ".0" in o.name]
     if suffix_drift:
         failures.append("rebuild left numbered duplicates: {}".format(suffix_drift[:3]))
+
+    # --- the visibility toggle must actually toggle -----------------------
+    toggled = set_ecm_visible(False, coll)
+    if toggled != len(coll.objects):
+        failures.append("visibility toggle reported {} objects, collection has "
+                        "{}".format(toggled, len(coll.objects)))
+    if not (coll.hide_viewport and coll.hide_render):
+        failures.append("set_ecm_visible(False) left the collection visible")
+    set_ecm_visible(True, coll)
+    if coll.hide_viewport or coll.hide_render:
+        failures.append("set_ecm_visible(True) left the collection hidden")
 
     # leave a populated region behind for inspection
     final = _fibers_in_after_build(coll, bounds, seed)

@@ -173,7 +173,25 @@ RBC_HALF_THICKNESS_UM = 1.25
 #: How deep the central dimple cuts, as a fraction of the half-thickness.
 RBC_DIMPLE = 0.62
 RBC_PROFILE_STEPS = 9
-RBC_SPIN_STEPS = 20
+#: Raised from 20 because the membrane noise below is finer than a 20-step ring
+#: can carry. At 20 steps there is 2*pi*3.75/20 = 1.18 um between neighbouring
+#: ring vertices, and undulation with a wavelength under about twice that
+#: aliases into a faceted ring rather than reading as a membrane. 32 puts the
+#: spacing at 0.74 um, which resolves the wavelength. The cost is 360 -> 576
+#: quads on one shared datablock, which is the cheapest place to spend them.
+RBC_SPIN_STEPS = 32
+#: Membrane relief, as a fraction of the in-plane radius. Deliberately small:
+#: a real erythrocyte membrane undulates by tens of nanometres against a 3.75
+#: um half-radius, so this is already an exaggeration, and the budget for
+#: exaggeration is set by how much of the cell it is allowed to hide -- which
+#: at this amplitude is nothing. It is here to give the silhouette a catch
+#: light, not to model topology.
+RBC_MEMBRANE_NOISE = 0.035
+#: Angular frequency of the membrane relief. Low, because the wavelength has to
+#: clear the ring spacing set by :data:`RBC_SPIN_STEPS`; high enough that the
+#: disc is not merely a circle of revolution, which is the failure mode that
+#: makes a biconcave cell read as a lentil.
+RBC_MEMBRANE_FREQUENCY = 3.0
 
 #: How many red blood cells a default vessel carries. Low enough to stay
 #: cheap, high enough that the lumen reads as full of blood rather than as an
@@ -562,6 +580,101 @@ def _selftest_wall_geometry() -> dict:
     return out
 
 
+def _selftest_rbc_membrane() -> dict:
+    """Check the red cell's membrane relief. Needs bpy, so it builds meshes.
+
+    Three properties, split deliberately rather than measured as one number.
+
+    **The relief varies with angle.** A surface of revolution perturbed
+    symmetrically is still a surface of revolution, so it would cost polygons
+    and change nothing a viewer can see -- and that is the entire reason the
+    noise is there. Checked on the factory, because that is where the property
+    lives and where it is unambiguous.
+
+    **The relief reaches the mesh.** Checked by building the same disc twice,
+    once with the factor and once without, and diffing vertex by vertex. The
+    two builds have identical topology and identical vertex order, so the diff
+    is exact rather than a nearest-neighbour guess. A factor wired up wrongly
+    -- applied to the thickness, or dropped from the ``_rbc_mesh`` call --
+    moves nothing, and this is the assertion that catches it.
+
+    **The rim does not grow past its declared bound.** This is the one that
+    protects the build, because :func:`_extent` takes the *maximum* vertex
+    radius and that number feeds :func:`_placement_radius`. A mesh that grew
+    would push red cells into the wall while every containment check stayed
+    green, since the validator measures the same mesh it checks:
+    self-consistent growth is exactly the bug a self-consistent validator
+    cannot see. The bound is derived, not guessed -- the multiplier cannot
+    exceed ``1 + RBC_MEMBRANE_NOISE``, so the test asserts the construction's
+    own ceiling and cannot pass by luck.
+
+    An earlier version of this measured one combined "spread" figure over a
+    wide band of near-rim vertices, and it was wrong twice over: the band's own
+    profile curvature swamped the relief, so a *symmetric* factor passed, and
+    a narrow-band version collapsed to two vertices on some seeds, which made
+    the result depend on the seed. Measuring the factory and the mesh
+    separately removes the fragile band entirely.
+    """
+    half = RBC_DIAMETER_UM * 0.5
+    nominal = (RBC_HALF_THICKNESS_UM * RBC_DIMPLE, RBC_HALF_THICKNESS_UM)
+
+    factor = _disc_noise(random.Random(0))
+
+    # The relief is angular. Sampled at fixed s, because the s term is the
+    # radial one and mixing the two would hide a factor that ignored theta.
+    by_angle = [factor(2.0 * math.pi * i / RBC_SPIN_STEPS, 1.0)
+                for i in range(RBC_SPIN_STEPS)]
+    angular = max(by_angle) - min(by_angle)
+    # A quarter of the full possible swing, which is 2x the amplitude. Wide
+    # enough that no seed falls below it, far above the 0.0 a symmetric
+    # factor produces.
+    assert angular > RBC_MEMBRANE_NOISE * 0.25, \
+        "membrane relief does not vary with angle: range {:.5f}".format(angular)
+
+    rough = _disc_mesh("MESH_SELFTEST_RBC_RELIEF", RBC_DIAMETER_UM,
+                       nominal[0], nominal[1], steps=RBC_PROFILE_STEPS,
+                       spin=RBC_SPIN_STEPS, factor=factor)
+    smooth = _disc_mesh("MESH_SELFTEST_RBC_SMOOTH", RBC_DIAMETER_UM,
+                        nominal[0], nominal[1], steps=RBC_PROFILE_STEPS,
+                        spin=RBC_SPIN_STEPS)
+    try:
+        assert len(rough.vertices) == len(smooth.vertices), \
+            "relief changed vertex count: {} vs {}".format(
+                len(rough.vertices), len(smooth.vertices))
+        moved = [1 if (a.co - b.co).length > 1e-9 else 0
+                 for a, b in zip(rough.vertices, smooth.vertices)]
+        assert any(moved), "membrane relief never reached the mesh"
+        assert max(moved) == 1, \
+            "some vertices are shared between the two builds; vertex order " \
+            "is not what the diff assumes"
+        # The two on-axis poles are where the profile closes, and relief is
+        # scaled by s so they are stationary by construction. Located by
+        # geometry rather than by index: the spin rewrites vertex order, so
+        # they are not first and last. If they move, the radius guard below is
+        # not measuring the rim.
+        poles = [i for i, v in enumerate(smooth.vertices) if v.co.xy.length <= 1e-9]
+        assert len(poles) == 2, \
+            "expected 2 on-axis poles, found {}".format(len(poles))
+        assert not any(moved[i] for i in poles), \
+            "on-axis pole moved; relief is not scaled by distance from centre"
+
+        # Ceiling on the multiplier, applied to the whole mesh rather than to a
+        # selected band: the rim is the widest thing on it, so the maximum
+        # vertex radius anywhere is the bound.
+        widest = max(v.co.xy.length for v in rough.vertices)
+        ceiling = half * (1.0 + RBC_MEMBRANE_NOISE)
+        assert widest <= ceiling + 1e-6, \
+            "mesh reaches {:.4f} um, past the {:.4f} um the multiplier can " \
+            "produce".format(widest, ceiling)
+
+        return {"moved_vertices": sum(moved), "verts": len(rough.vertices),
+                "angular_range": angular, "max_radius": widest,
+                "ceiling": ceiling, "polys": len(rough.polygons)}
+    finally:
+        bpy.data.meshes.remove(rough)
+        bpy.data.meshes.remove(smooth)
+
+
 def _extent(mesh, margin: float = None) -> float:
     """Half-extent a randomly tilted blood component presents to the lumen.
 
@@ -787,8 +900,40 @@ def _tube_mesh(name: str, frames: list, radius: float, factor, *,
     return mesh
 
 
+def _disc_noise(rng):
+    """Return ``f(theta, s) -> multiplier`` for a disc's in-plane radius.
+
+    The same shape as :func:`_radius_profile` and for the same reason: one
+    seeded closure, so a disc is reproducible from its seed, and the noise
+    lives in the geometry rather than in a texture that the validator cannot
+    see.
+
+    *theta* is the angle around the spin axis and *s* runs 0 at the face centre
+    to 1 at the rim, so the relief is strongest at the rim -- the membrane is
+    slack where it is anchored, which is also where the silhouette is read from.
+
+    The multiplier is 1.0 plus a single signed noise octave: one octave is what
+    gives an asymmetric wobble, and asymmetry is the entire point. A symmetric
+    perturbation of a surface of revolution is still a surface of revolution,
+    so it costs polygons and changes nothing a viewer can see.
+    """
+    phase = Vector([rng.uniform(-40.0, 40.0) for _ in range(3)])
+
+    def factor(theta: float, s: float) -> float:
+        # The radius term is what makes the relief wavelength-independent of
+        # how far out the vertex sits; without it the dimple floor, where s is
+        # near zero, would wobble as hard as the rim.
+        n = noise.noise(Vector((math.cos(theta) * RBC_MEMBRANE_FREQUENCY,
+                                math.sin(theta) * RBC_MEMBRANE_FREQUENCY,
+                                s * 0.8)) + phase)
+        return 1.0 + RBC_MEMBRANE_NOISE * s * n
+
+    return factor
+
+
 def _disc_mesh(name: str, diameter: float, centre_thickness: float,
-               rim_thickness: float, steps: int = 9, spin: int = 20) -> object:
+               rim_thickness: float, steps: int = 9, spin: int = 20,
+               factor=None) -> object:
     """A disc of revolution: a blood platelet, or a red blood cell.
 
     The profile is the cell's cross-section: an open polyline running from the
@@ -812,6 +957,12 @@ def _disc_mesh(name: str, diameter: float, centre_thickness: float,
 
     Two near-identical spin functions would have been the alternative; this is
     one function and two callers.
+
+    *factor* is an optional ``f(theta, s) -> multiplier`` on the in-plane
+    radius, matching :func:`_radius_profile`'s signature. It is deliberately
+    not applied to *centre_thickness* or *rim_thickness*: the biconcave
+    profile is the recognisable part of a red blood cell, and relief on the
+    faces would eat the dimple that distinguishes it from a platelet.
 
     The disc ends up lying on its side, axis along Y. That is harmless and
     cheaper to fix than to special-case: the discs are randomly rotated anyway.
@@ -854,6 +1005,25 @@ def _disc_mesh(name: str, diameter: float, centre_thickness: float,
     bmesh.ops.dissolve_degenerate(bm, dist=1e-6, edges=bm.edges)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
+    # Membrane relief, applied after the spin rather than to the profile.
+    # The spin sweeps one profile around a full turn, so a theta-dependent
+    # multiplier cannot be baked into the profile -- every spun copy shares the
+    # profile's radius. Displacing the spun vertices lets each one see its own
+    # angle, which is the whole mechanism.
+    if factor is not None:
+        for vert in bm.verts:
+            co = vert.co
+            # The spin axis is Z, so the in-plane radius is the length of the
+            # XY component. The on-axis poles have none, and stay put: a
+            # zero-length radius would give a zero s and displace nothing.
+            in_plane = math.hypot(co.x, co.y)
+            if in_plane <= 1e-9:
+                continue
+            theta = math.atan2(co.y, co.x)
+            scale = factor(theta, in_plane / half)
+            vert.co.x = co.x * scale
+            vert.co.y = co.y * scale
+
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
@@ -861,11 +1031,23 @@ def _disc_mesh(name: str, diameter: float, centre_thickness: float,
     return mesh
 
 
-def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC)) -> object:
-    """A biconcave disc: a red blood cell. See :func:`_disc_mesh`."""
+def _rbc_mesh(name: str = "MESH_{}".format(PREFIX_RBC),
+              seed: int = 0) -> object:
+    """A biconcave disc: a red blood cell. See :func:`_disc_mesh`.
+
+    The membrane relief is seeded, so the cell is reproducible. Every
+    instance shares this one mesh -- the validator enforces it -- which is why
+    the relief is worth having at all: a fixed asymmetric wobble, seen at the
+    fifteen different rolls the instances already get, reads as fifteen
+    different silhouettes. That is the ceiling instancing puts on per-cell
+    variation, and it is the reason this is membrane noise rather than
+    per-cell geometry.
+    """
+    rng = random.Random(seed)
     return _disc_mesh(name, RBC_DIAMETER_UM,
                       RBC_HALF_THICKNESS_UM * RBC_DIMPLE, RBC_HALF_THICKNESS_UM,
-                      steps=RBC_PROFILE_STEPS, spin=RBC_SPIN_STEPS)
+                      steps=RBC_PROFILE_STEPS, spin=RBC_SPIN_STEPS,
+                      factor=_disc_noise(rng))
 
 
 def _platelet_mesh(name: str = "MESH_{}".format(PREFIX_PLATELET)) -> object:
@@ -1761,6 +1943,22 @@ def main() -> None:
         raise SystemExit("[vessel] WALL GEOMETRY CHECK FAILED")
     print("[vessel] wall geometry: endothelium and lumen anchored, "
           "wall grows outward")
+
+    # Also before the build, for the same reason as the wall check: the mesh
+    # assertions run on a cell the validator has not seen, so a membrane that
+    # grew the geometry is caught here rather than being agreed with by the
+    # containment check downstream.
+    try:
+        membrane = _selftest_rbc_membrane()
+    except AssertionError as exc:
+        print("[vessel] FAIL: rbc membrane: {}".format(exc))
+        raise SystemExit("[vessel] RBC MEMBRANE CHECK FAILED")
+    print("[vessel] rbc membrane: {} of {} vertices displaced, angular "
+          "range {:.4f}, max radius {:.4f} um (ceiling {:.4f})".format(
+              membrane["moved_vertices"], membrane["verts"],
+              membrane["angular_range"], membrane["max_radius"],
+              membrane["ceiling"]))
+
     build_test_vessel()
     report = validate_blood_vessel()
 

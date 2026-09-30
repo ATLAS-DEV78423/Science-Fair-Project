@@ -62,34 +62,63 @@ the scene looking untracked, that is correct, not a problem to fix.
 
 ## Status
 
-**Branch** `vessel-internals` · base `5e5bd0b` · plan
-`docs/superpowers/plans/2026-09-28-vessel-internals.md` (8 tasks) · spec
-`docs/superpowers/specs/2026-09-28-vessel-internals-design.md`
+**Branch** `vessel-internals` · HEAD `8b06783` "Animate idle cell motion and
+guard the tumour speed constraint" · plan
+`docs/superpowers/plans/2026-09-28-cellular-idle-animation.md` (the vessel
+plan's 8 tasks are still the longer-range track)
 
-Suite **passing** as of 2026-09-28: all six implemented assets green.
-Vessel: 3 vessels, 14 shells, 70 components, 4 shared source meshes.
-ECM: 756 fibres, 1 shared mesh, `MAT_ECM_Collagen` only.
+**Suite fully green, re-verified 2026-09-29** — all six asset/animation scripts
+plus the scene selftest:
 
-| Task | Subject | State |
-|---|---|---|
-| — | `asset_ecm.py` collagen network | **done, uncommitted** |
-| 1 | Wall layer arithmetic and the new shells | done — `c716bb8`, `f84a910` |
-| 2 | Materials for the new layers | done, **uncommitted** |
-| 3 | Fibrin and the thrombus meshes | not started |
-| 4 | Wall-bound cells — pericyte, endothelial | not started |
-| 5 | Class split and wall-bound placement | not started |
-| 6 | Gaps, the clot, containment that can see them | not started |
-| 7 | Margination and extravasation | not started |
-| 8 | Documentation and the render check | not started |
+| Script | Marker |
+|---|---|
+| `asset_healthy_cell.py` | `[healthy_cell] VALIDATION PASSED` |
+| `asset_tumor_cell.py` | `[tumor_cell] VALIDATION PASSED` |
+| `asset_immune_cells.py` | `[immune] VALIDATION PASSED` |
+| `asset_ecm.py` | `[ecm] VALIDATION PASSED` |
+| `animation_idle.py` | `[idle] VALIDATION PASSED` |
+| `asset_blood_vessel.py` | `[vessel] VALIDATION PASSED` |
+| `scene_tumor.py -- --selftest` | `{'objects': 1525, 'collections': 11, 'duplicated': [], 'ok': True}` |
 
-**Uncommitted work:**
-- `blender/scripts/asset_blood_vessel.py` (+151/−6): Task 2 material specs
-  `MAT_Vessel_SmoothMuscle` / `BasementMembrane` / `Pericyte`, plus validator
-  plumbing `MEASURED_RADIUS_TOLERANCE` and `PROP_REQUESTED_RADIUS`. Suite passes.
-- `blender/scripts/asset_ecm.py` (new), plus `blender/README.md`.
+Sweep command (one line, ~3 min total):
 
-**Next up:** Task 3 — `_clot_mesh`, `_fibrin_mesh`, and their two `create_*`
-builders. Neither function exists yet.
+```sh
+cd ~/Work/science-fair-virotherapy && for s in asset_healthy_cell asset_tumor_cell \
+  asset_immune_cells asset_ecm animation_idle asset_blood_vessel; do
+  blender --background --python blender/scripts/$s.py 2>&1 | grep -E "VALIDATION PASSED|Traceback"; done
+```
+
+### Uncommitted work — 4 files, +624/−82
+
+`animation_idle.py` (+441) is the bulk: nucleus gets its own period
+(`_nucleus_period`, `NUCLEUS_RATE_RATIO`), action ownership tagging
+(`ACT_Idle_` prefix + `_is_idle`) so the validator stops policing foreign
+curves, nucleus-binding fences that **fail loudly** instead of guessing
+(`_layered_parts` now returns a `problem`, `KNOWN_LAYER_COUNTS = (3, 4)`,
+`NUCLEUS_SIZE_RATIO = (0.25, 0.85)`), and a `motion_scale` default that was
+binding at def-time rather than call-time — now `None` + resolved inside.
+
+`asset_blood_vessel.py` (+208): RBC membrane relief. `_disc_noise`, a `factor`
+kwarg on `_disc_mesh`, `RBC_MEMBRANE_NOISE = 0.035`, `RBC_SPIN_STEPS` 20→32,
+and `_selftest_rbc_membrane()` wired into `main()`.
+
+`asset_ecm.py` (+30): `set_ecm_visible(visible)` + its validation.
+`scene_tumor.py` (+27): `build_ecm()` and the **first ECM wiring into the scene**.
+
+**Next up, in order:**
+1. **Plan Task 4 Step 5 is missing.** `scene_tumor.build()` imports `asset_ecm`
+   but never imports or calls `animation_idle`. A rebuilt scene is static —
+   the exact failure the idle feature exists to prevent. Needs the call, plus
+   the `"idle_cells"` return key.
+2. **Plan Task 4 Step 7: `blender/README.md` is stale.** `animation_idle.py` is
+   missing from the script tree, and line 437 still claims "The six
+   `animation_*.py` scripts are contracts only."
+3. Vessel plan Tasks 3–8 still not started — `_clot_mesh` and `_fibrin_mesh`
+   do not exist.
+4. Two vacuous asserts to delete: `asset_ecm.py:652` compares
+   `set_ecm_visible`'s own return value against itself;
+   `asset_blood_vessel.py:647` `assert max(moved) == 1` is implied by the
+   `any(moved)` on the line above.
 
 ### ECM — decided, and why it matters for Task 7
 
@@ -102,6 +131,41 @@ function and not a number baked into placement.
 
 The network is **visually** connected, not topologically. Instancing forbids
 shared junctions; fibres cross instead. Not to be "fixed" later.
+
+---
+
+## Latest state — 2026-09-29
+
+Reconnected to the session. Blender was **not running** — only the MCP server
+process was, so the bridge refused. Launched detached, MCP addon autostarts so
+no flag is needed:
+
+```sh
+cd ~/Work/science-fair-virotherapy && setsid nohup blender \
+  ~/Work/science-fair-virotherapy/blender/scenes/virotherapy_main.blend \
+  >/tmp/opencode/blender-launch.log 2>&1 </dev/null &
+```
+
+Bridge live on `127.0.0.1:9876`; `virotherapy_main.blend` clean, not dirty.
+
+**Scene as loaded:** 2809 meshes, 125 mesh datablocks, 30 materials, 0 actions,
+Cycles, frames 1–240. Real content in `06_EXTRACELLULAR_MATRIX` (1513 fibre
+instances off **one** shared mesh, 1513 users). The `TEST_*` collections hold the
+cell/vessel/virion scratch (560 HSV1, 564 tumour, 158 immune, 30 healthy,
+21 vessel) — the viewport is mostly that, not the scene build.
+
+Recovered the work from `git log` + `git diff`, not from this file: the log had
+not been updated past the ECM commit, and the real state was four files ahead.
+Full re-verified status is in the **Status** block above.
+
+**PENDING**
+- Wire `animation_idle` into `scene_tumor.build()` (Task 4 Step 5) — the gap
+  that matters most.
+- Update `blender/README.md` (Task 4 Step 7).
+- Delete the two vacuous asserts.
+- Commit the 4 uncommitted files.
+- Vessel plan Tasks 3–8.
+- `set_ecm_visible` and `_rbc_mesh(seed=...)` have no production caller.
 
 ---
 
